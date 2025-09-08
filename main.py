@@ -1,7 +1,7 @@
 """
 Temporal UNet + ConvLSTM for dual-satellite cloud vertical velocity estimation (w-field)
 --------------------------------------------------------------------------------------
-- Input at each time t: two satellite images that view the same cloud field at approximately the same time t (from two satellites). 
+- Input at each time t: two satellite images that view the same cloud field at approximately the same time t (from two satellites).
   The two frames are concatenated along the channel dimension.
 - Sequence input: length T. The model outputs a velocity map per time step.
 - Output: single-channel (default) vertical velocity (w) map in m/s (or normalized), per pixel.
@@ -240,42 +240,20 @@ class Averager:
         return self.tot / max(1, self.n)
 
 
-def train_one_epoch(model, loader, optimizer, device, loss_fn):
-    model.train()
-    meter = Averager()
-    for x, y in tqdm(loader, desc="Training", leave=False):
-        # x: [B, T, C, H, W], y: [B, T, C_out, H, W]
-        x = x.to(device); y = y.to(device)
-        y_seq_pred, _ = model(x)
-        # stack predictions: [T, B, C_out, H, W] -> [B, T, C_out, H, W]
-        y_pred = torch.stack(y_seq_pred, dim=1)
-        loss = loss_fn(y_pred, y)
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        meter.add(loss.item(), n=x.size(0))
-    return meter.avg
-
-@torch.no_grad()
-def evaluate(model, loader, device, loss_fn):
-    model.eval()
-    meter = Averager()
-    for x, y in loader:
-        x = x.to(device); y = y.to(device)
-        y_seq_pred, _ = model(x)
-        y_pred = torch.stack(y_seq_pred, dim=1)
-        loss = loss_fn(y_pred, y)
-        meter.add(loss.item(), n=x.size(0))
-    return meter.avg
-
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+
+
+# -----------------------------
+# Dataset
+# -----------------------------
 class MovingMNISTDataset(Dataset):
-    def __init__(self, path):
+    def __init__(self, path, max_vel=5.0):
         npz_file = np.load(path)
-        self.data = npz_file["data"]  # (N, T, 1, H, W)
+        self.data = npz_file["data"]  # (N, T, 2, H, W)
+        self.max_vel = max_vel
 
     def __len__(self):
         return len(self.data)
@@ -285,46 +263,98 @@ class MovingMNISTDataset(Dataset):
 
         # Input: digit sequence (first channel)
         x = seq[:, 0:1]  # (T, 1, H, W)
-
         # duplicate channel to simulate two cameras
         x = x.repeat(1, 2, 1, 1)  # (T, 2, H, W)
 
         # Target: velocity map (second channel)
-        y = seq[:, 1:2]  # (T, 1, H, W)
+        y = seq[:, 1:2] / self.max_vel  # (T, 1, H, W)
 
-        return x, y
+        # Mask: foreground
+        mask = (seq[:, 0:1] > 0).float()
+
+        return x, y, mask
+
+
 # -----------------------------
-# Example usage with synthetic data
+# Training function
+# -----------------------------
+def train_one_epoch(model, loader, optimizer, device):
+    model.train()
+    total_loss = 0.0
+    n_samples = 0
+
+    for x, y, mask in tqdm(loader, desc="Training", leave=False):
+        x = x.to(device)
+        y = y.to(device)
+        mask = mask.to(device)
+
+        y_seq_pred, _ = model(x)  # list of [B, C, H, W]
+        y_pred = torch.stack(y_seq_pred, dim=1)  # [B, T, C, H, W]
+
+        # Compute masked L1 loss
+        diff = (y_pred - y) * mask
+        loss = diff.abs().sum() / (mask.sum() + 1e-8)
+
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+
+        total_loss += loss.item() * x.size(0)
+        n_samples += x.size(0)
+
+    return total_loss / n_samples
+
+
+# -----------------------------
+# Evaluation function
+# -----------------------------
+@torch.no_grad()
+def evaluate(model, loader, device):
+    model.eval()
+    total_loss = 0.0
+    n_samples = 0
+
+    for x, y, mask in loader:
+        x = x.to(device)
+        y = y.to(device)
+        mask = mask.to(device)
+
+        y_seq_pred, _ = model(x)
+        y_pred = torch.stack(y_seq_pred, dim=1)
+
+        diff = (y_pred - y) * mask
+        loss = diff.abs().sum() / (mask.sum() + 1e-8)
+
+        total_loss += loss.item() * x.size(0)
+        n_samples += x.size(0)
+
+    return total_loss / n_samples
+
+
+# -----------------------------
+# Example usage
 # -----------------------------
 if __name__ == "__main__":
-    path = "moving_mnist.npz"   # הקובץ ששמרת קודם
-    batch_size = 4
-    print(torch.cuda.is_available())  #
-    print(torch.version.cuda)  #
+    path = "moving_mnist.npz"
+    batch_size = 32
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load dataset
     dataset = MovingMNISTDataset(path)
-    n = len(dataset)
-    n_train = int(0.8 * n)
-    n_val = n - n_train
+    n_train = int(0.8 * len(dataset))
+    n_val = len(dataset) - n_train
     train_ds, val_ds = torch.utils.data.random_split(dataset, [n_train, n_val])
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=True)
 
-    # Model, loss, optimizer
-    model = TemporalUNetDualView(in_channels_per_sat=1, out_channels=1,
-                                 base_ch=32, lstm_layers=1).to(device)
-    #loss_fn = nn.MSELoss()
-    loss_fn = nn.L1Loss()
+    model = TemporalUNetDualView(in_channels_per_sat=1, out_channels=1, base_ch=32, lstm_layers=1).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
 
-    # Training loop
     EPOCHS = 5
     for epoch in range(1, EPOCHS + 1):
-        tr_loss = train_one_epoch(model, train_loader, optimizer, device, loss_fn)
-        val_loss = evaluate(model, val_loader, device, loss_fn)
+        tr_loss = train_one_epoch(model, train_loader, optimizer, device)
+        val_loss = evaluate(model, val_loader, device)
         print(f"Epoch {epoch}: train={tr_loss:.4f} | val={val_loss:.4f}")
 
     # Save model
@@ -336,3 +366,4 @@ if __name__ == "__main__":
         }
     }, 'temporal_unet_convlstm_dualview.pt')
     print("Saved: temporal_unet_convlstm_dualview.pt")
+
