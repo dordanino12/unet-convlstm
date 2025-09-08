@@ -337,7 +337,7 @@ def evaluate(model, loader, device):
 # -----------------------------
 if __name__ == "__main__":
     path = "moving_mnist_2.npz"
-    batch_size = 32
+    batch_size = 64
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = MovingMNISTDataset(path)
@@ -351,7 +351,7 @@ if __name__ == "__main__":
     model = TemporalUNetDualView(in_channels_per_sat=1, out_channels=1, base_ch=32, lstm_layers=1).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
 
-    EPOCHS = 10
+    EPOCHS = 20
     for epoch in range(1, EPOCHS + 1):
         tr_loss = train_one_epoch(model, train_loader, optimizer, device)
         val_loss = evaluate(model, val_loader, device)
