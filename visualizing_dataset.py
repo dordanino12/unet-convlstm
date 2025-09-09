@@ -3,10 +3,10 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 # Load the dataset
-data = np.load("moving_mnist_2.npz")['data']  # Shape: [num_samples, seq_len, 2, H, W]
+data = np.load("moving_mnist_2dig_40seq.npz")['data']  # Shape: [num_samples, seq_len, 2, H, W]
 
 # Select a sample sequence
-sample_idx = 3
+sample_idx = 7
 sequence_digits = data[sample_idx, :, 0]  # Shape: [seq_len, H, W]
 sequence_vx = data[sample_idx, :, 1]      # Shape: [seq_len, H, W]
 

@@ -58,10 +58,10 @@ def generate_moving_mnist(seq_len=10, num_samples=1000, image_size=64, num_digit
     return data
 
 if __name__ == "__main__":
-    seq_len = 20
+    seq_len = 40
     num_samples = 10000
     data = generate_moving_mnist(seq_len=seq_len, num_samples=num_samples)
 
     # Save in npz format
-    np.savez_compressed("moving_mnist_2.npz", data=data)
+    np.savez_compressed("moving_mnist_2dig_40seq.npz", data=data)
     print("✅ Dataset with vx map saved to moving_mnist.npz")

@@ -46,7 +46,7 @@ class MovingMNISTDataset(torch.utils.data.Dataset):
         return x, y
 
 
-dataset = MovingMNISTDataset("moving_mnist_2.npz")
+dataset = MovingMNISTDataset("moving_mnist_2dig_40seq.npz")
 
 # -----------------------------
 # Select a sequence
