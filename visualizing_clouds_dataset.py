@@ -64,7 +64,13 @@ class PKLSequenceDataset(Dataset):
             target = np.ma.getdata(data['target'])  # (H,W) or (T,H,W)
 
             # select cameras 0 & 2, first timestep
-            x = tensors[0, [0, 2]]
+            if "raw" in folder_path:
+                # select cameras 0, 1, 2, first timestep
+                x = tensors[0]
+                x = x[[0, 2]]  # (2, H, W)
+            else:
+                # select cameras 0 & 2, first timestep
+                x = tensors[0, [0, 2]]  # (2, H, W)
             inputs.append(torch.from_numpy(x).float())
 
             # target at first timestep
@@ -122,4 +128,12 @@ def update(t):
 
 
 ani = FuncAnimation(fig, update, frames=sequence_cams.shape[0], interval=200, blit=True)
-plt.show()
+# Create 'plots' folder if it doesn't exist
+plots_dir = "plots"
+os.makedirs(plots_dir, exist_ok=True)
+
+# Save the animation to the plots folder
+output_path = os.path.join(plots_dir, f"sequence_{sample_idx}.mp4")
+ani.save(output_path, writer='ffmpeg', fps=5)
+
+print(f"Animation saved to {output_path}")
