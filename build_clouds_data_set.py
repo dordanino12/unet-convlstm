@@ -9,7 +9,7 @@ from tqdm import tqdm
 # Settings
 # -----------------------------
 folder_path = "/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_mitsuba_transformed_iso/"
-output_path = "dataset_sequences_original.npz"
+output_path = "data/dataset_sequences_original.npz"
 seq_len = 20
 overlap = 10
 stride = seq_len - overlap

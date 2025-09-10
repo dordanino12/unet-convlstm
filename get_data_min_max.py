@@ -1,7 +1,7 @@
 import numpy as np
 
 # Path to your npz file
-npz_path = "dataset_sequences_original.npz"
+npz_path = "data/dataset_sequences_original.npz"
 
 # Load the npz file
 data = np.load(npz_path)
