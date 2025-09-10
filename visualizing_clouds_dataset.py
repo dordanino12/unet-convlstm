@@ -93,7 +93,7 @@ overlap = 10
 dataset = PKLSequenceDataset(folder_path, seq_len=seq_len, overlap=overlap)
 
 # Choose a sample for visualization
-sample_idx = 100
+sample_idx = 500
 x_seq, y_seq, time_seq = dataset[sample_idx]  # x_seq: [T,2,H,W], y_seq: [T,1,H,W]
 
 sequence_cams = x_seq.numpy()
@@ -128,12 +128,16 @@ def update(t):
 
 
 ani = FuncAnimation(fig, update, frames=sequence_cams.shape[0], interval=200, blit=True)
-# Create 'plots' folder if it doesn't exist
-plots_dir = "plots"
-os.makedirs(plots_dir, exist_ok=True)
 
-# Save the animation to the plots folder
-output_path = os.path.join(plots_dir, f"sequence_{sample_idx}.mp4")
-ani.save(output_path, writer='ffmpeg', fps=5)
+# Show the animation
+plt.show()
 
-print(f"Animation saved to {output_path}")
+# # Create 'plots' folder if it doesn't exist
+# plots_dir = "plots"
+# os.makedirs(plots_dir, exist_ok=True)
+#
+# # Save the animation to the plots folder
+# output_path = os.path.join(plots_dir, f"sequence_{sample_idx}.mp4")
+# ani.save(output_path, writer='ffmpeg', fps=5)
+#
+# print(f"Animation saved to {output_path}")

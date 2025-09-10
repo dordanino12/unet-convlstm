@@ -10,16 +10,18 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # Load the model checkpoint
 # -----------------------------
 checkpoint = torch.load(
-    "temporal_unet_convlstm_dualview.pt",
-    map_location="cuda" if torch.cuda.is_available() else "cpu"
+    "temporal_unet_convlstm_dualview_from_npz.pt",
+    map_location="cuda" if torch.cuda.is_available() else "cpu",
+    weights_only=True
 )
+
 cfg = checkpoint['cfg']
 
 # Recreate the model and load its state
 model = TemporalUNetDualView(
     in_channels_per_sat=cfg['in_channels_per_sat'],
     out_channels=cfg['out_channels'],
-    use_skip_lstm =cfg['use_skip_lstm']
+    use_skip_lstm=cfg['use_skip_lstm']
 )
 model.load_state_dict(checkpoint['model_state'])
 model.eval()
@@ -27,93 +29,102 @@ model.eval()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 
-
 # -----------------------------
-# Load the dataset
+# Load the NPZ dataset
 # -----------------------------
-class MovingMNISTDataset(torch.utils.data.Dataset):
-    def __init__(self, path):
-        npz_file = np.load(path)
-        self.data = npz_file["data"]  # (N, T, 2, H, W)
+class NPZSequenceDataset(torch.utils.data.Dataset):
+    def __init__(self, npz_path, min_vel=-8.79623031616211, max_vel=10.423197746276855):
+        data = np.load(npz_path)
+        self.X = data["X"]  # [N, T, 2, H, W]
+        self.Y = data["Y"]  # [N, T, 1, H, W]
+        self.min_vel = min_vel
+        self.max_vel = max_vel
 
     def __len__(self):
-        return len(self.data)
+        return self.X.shape[0]
 
     def __getitem__(self, idx):
-        seq = torch.from_numpy(self.data[idx])  # (T, 2, H, W)
-        x = seq[:, 0:1].repeat(1, 2, 1, 1)  # duplicate channel for two “satellites”
-        y = seq[:, 1:2]  # velocity map
-        return x, y
+        x = torch.from_numpy(self.X[idx]).float()  # [T, 2, H, W]
+        y = torch.from_numpy(self.Y[idx]).float()  # [T, 1, H, W]
+        # Normalize velocities to [-1,1]
+        y = 2 * (y - self.min_vel) / (self.max_vel - self.min_vel) - 1
+        mask = ((x[:, 0:1] > 0.12) | (x[:, 1:2] > 0.12)).float()
+        return x, y, mask
 
-
-dataset = MovingMNISTDataset("moving_mnist_2dig_40seq.npz")
+npz_path = "dataset_sequences_original.npz"
+dataset = NPZSequenceDataset(npz_path)
+sequence_idx = 10
+input_seq, gt_vel_seq, mask_seq = dataset[sequence_idx]
+T, C, H, W = input_seq.shape
 
 # -----------------------------
-# Select a sequence
+# Denormalize GT velocities for the whole sequence
 # -----------------------------
-sequence_idx = 5 # index of the sequence to test
-input_seq, gt_vel_seq = dataset[sequence_idx]  # (T, 2, H, W), (T, 1, H, W)
-T = input_seq.shape[0]
-
-max_vel = 5.0  # denormalization factor
+gt_vel_denorm = 0.5 * (gt_vel_seq + 1) * (dataset.max_vel - dataset.min_vel) + dataset.min_vel
 
 # -----------------------------
 # Run inference incrementally
 # -----------------------------
-for t_len in range(1, T + 1):
-    # Take the first t_len frames
+for t_len in range(1, T+1):
     x_input = input_seq[:t_len].unsqueeze(0).to(device)  # [1, t_len, 2, H, W]
-
     with torch.no_grad():
-        predicted_seq, _ = model(x_input)   # predicted_seq: [T, B, C, H, W] or similar
+        pred_seq, _ = model(x_input)
+    pred_vel = torch.stack(pred_seq, dim=1).squeeze(0).cpu().numpy()  # [T,1,H,W]
+
+    # Denormalize predicted velocities
+    pred_vel_denorm = 0.5 * (pred_vel + 1) * (dataset.max_vel - dataset.min_vel) + dataset.min_vel
+
+    # Last frame for display
+    last_input = input_seq[t_len-1,0].cpu().numpy()
+    last_gt = gt_vel_denorm[t_len-1, 0].cpu().numpy()
+    last_pred = pred_vel_denorm[t_len-1,0]
+    last_mask = mask_seq[t_len-1,0].cpu().numpy()
+    last_pred_masked = last_pred * last_mask
 
     # -----------------------------
-    # Extract mask from the last frame of the input
+    # Determine vmin/vmax for this sequence
     # -----------------------------
-    # Here, using the first channel of the last frame as mask (any pixel > 0 is "object")
-    mask = (x_input[0, t_len-1, 0] > 0).float().cpu().numpy()   # shape [H, W]
-
-    # Last frame in the input sequence (for display)
-    last_frame_digit = input_seq[t_len - 1, 0].cpu().numpy()  # first channel
-    last_frame_gt_vel = gt_vel_seq[t_len - 1, 0].cpu().numpy()
-
-    # Predicted velocity for last frame
-    pred_vel = predicted_seq[-1].squeeze(0).cpu().numpy()[0]  # [H, W]
-    pred_vel = pred_vel * max_vel  # denormalize
+    vmin_seq = min(last_gt.min(), last_pred.min())
+    vmax_seq = max(last_gt.max(), last_pred.max())
 
     # -----------------------------
-    # Apply mask on predicted velocity
+    # Plot results with both input channels
     # -----------------------------
-    pred_vel_masked = pred_vel * mask   # zero out the background
+    fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+    fig.suptitle(f"Sequence frames: {t_len}", fontsize=14)
 
-    # -----------------------------
-    # Plot results with colorbar
-    # -----------------------------
-    fig, axes = plt.subplots(1, 4, figsize=(12, 4))
-    fig.suptitle(f"Number of Frames in the Sequence: {t_len}", fontsize=14)
+    # Display both input channels
+    axes[0, 0].imshow(input_seq[t_len - 1, 0].cpu().numpy(), cmap='gray')
+    axes[0, 0].set_title("Last Input Frame (Sat 1)")
+    axes[0, 0].axis('off')
 
-    # Last input frame
-    axes[0].imshow(last_frame_digit, cmap='gray', vmin=0, vmax=1)
-    axes[0].set_title("Last Input Frame")
-    axes[0].axis('off')
+    axes[1, 0].imshow(input_seq[t_len - 1, 1].cpu().numpy(), cmap='gray')
+    axes[1, 0].set_title("Last Input Frame (Sat 2)")
+    axes[1, 0].axis('off')
 
     # Ground-truth velocity
-    im1 = axes[1].imshow(last_frame_gt_vel, cmap='hot', vmin=-max_vel, vmax=max_vel)
-    axes[1].set_title("GT Velocity")
-    axes[1].axis('off')
-    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+    im1 = axes[0, 1].imshow(last_gt, cmap='jet', vmin=vmin_seq, vmax=vmax_seq)
+    axes[0, 1].set_title("GT Velocity")
+    axes[0, 1].axis('off')
+    fig.colorbar(im1, ax=axes[0, 1], fraction=0.046, pad=0.04)
 
-    # Predicted velocity (raw)
-    im2 = axes[2].imshow(pred_vel, cmap='hot', vmin=-max_vel, vmax=max_vel)
-    axes[2].set_title("Predicted Velocity (Raw)")
-    axes[2].axis('off')
-    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+    # # Predicted velocity (raw)
+    # im2 = axes[0, 2].imshow(last_pred, cmap='jet', vmin=vmin_seq, vmax=vmax_seq)
+    # axes[0, 2].set_title("Predicted Velocity (Raw)")
+    # axes[0, 2].axis('off')
+    # fig.colorbar(im2, ax=axes[0, 2], fraction=0.046, pad=0.04)
 
     # Predicted velocity (masked)
-    im3 = axes[3].imshow(pred_vel_masked, cmap='hot', vmin=-max_vel, vmax=max_vel)
-    axes[3].set_title("Predicted Velocity (Masked)")
-    axes[3].axis('off')
-    fig.colorbar(im3, ax=axes[3], fraction=0.046, pad=0.04)
+    im3 = axes[0, 2].imshow(last_pred_masked, cmap='jet', vmin=vmin_seq, vmax=vmax_seq)
+    axes[0, 2].set_title("Predicted Velocity (Masked)")
+    axes[0, 2].axis('off')
+    fig.colorbar(im3, ax=axes[0, 2], fraction=0.046, pad=0.04)
+
+    # Leave second row for second input channel only (or replicate other plots if desired)
+    axes[1, 1].axis('off')
+    axes[1, 2].axis('off')
+    #axes[1, 3].axis('off')
 
     plt.tight_layout()
     plt.show()
+

@@ -1,6 +1,6 @@
 """
 Temporal UNet + ConvLSTM with optional Skip-LSTM for dual-satellite velocity estimation
-Author: ChatGPT — Sept 2025
+Adapted to use pre-built NPZ sequence dataset with [-1,1] target normalization
 """
 from __future__ import annotations
 import torch
@@ -97,26 +97,22 @@ class OutConv(nn.Module):
     def forward(self, x): return self.conv(x)
 
 # -----------------------------
-# Temporal UNet Dual View with optional Skip-LSTM
+# Temporal UNet Dual View
 # -----------------------------
 class TemporalUNetDualView(nn.Module):
     def __init__(self, in_channels_per_sat=1, out_channels=1, base_ch=32, lstm_layers=1, use_skip_lstm=False):
         super().__init__()
         in_ch_total = in_channels_per_sat * 2
-        # Encoder
         self.inc = DoubleConv(in_ch_total, base_ch)
         self.down1 = Down(base_ch, base_ch*2)
         self.down2 = Down(base_ch*2, base_ch*4)
         self.down3 = Down(base_ch*4, base_ch*8)
         self.bottleneck = Down(base_ch*8, base_ch*16)
-        # Bottleneck LSTM
         self.temporal = ConvLSTM(base_ch*16, base_ch*16, num_layers=lstm_layers)
-        # Optional skip LSTMs
         self.use_skip_lstm = use_skip_lstm
         if use_skip_lstm:
-            self.lstm_skip3 = ConvLSTM(base_ch*8, base_ch*8, num_layers=1)
-            self.lstm_skip2 = ConvLSTM(base_ch*4, base_ch*4, num_layers=1)
-        # Decoder
+            self.lstm_skip3 = ConvLSTM(base_ch*8, base_ch*8)
+            self.lstm_skip2 = ConvLSTM(base_ch*4, base_ch*4)
         self.up3 = Up(base_ch*16, base_ch*8)
         self.up2 = Up(base_ch*8, base_ch*4)
         self.up1 = Up(base_ch*4, base_ch*2)
@@ -158,23 +154,31 @@ class TemporalUNetDualView(nn.Module):
         return out_seq, new_state
 
 # -----------------------------
-# Dataset for Moving MNIST
+# NPZ Dataset loader with velocity normalization [-1,1]
 # -----------------------------
-class MovingMNISTDataset(Dataset):
-    def __init__(self, path, max_vel=5.0):
-        npz = np.load(path)
-        self.data = npz["data"]  # (N, T, 2, H, W)
+class NPZSequenceDataset(Dataset):
+    def __init__(self, npz_path, min_vel=-8.79623031616211, max_vel=10.423197746276855):
+        data = np.load(npz_path)
+        self.X = data["X"].astype(np.float32)  # [N, T, 2, H, W]
+        self.Y = data["Y"].astype(np.float32)  # [N, T, 1, H, W]
+        self.N, self.T, _, self.H, self.W = self.X.shape
+        self.min_vel = min_vel
         self.max_vel = max_vel
-    def __len__(self): return len(self.data)
+
+    def __len__(self):
+        return self.N
+
     def __getitem__(self, idx):
-        seq = torch.from_numpy(self.data[idx])
-        x = seq[:, 0:1].repeat(1, 2, 1, 1)    # simulate 2 satellites
-        y = seq[:, 1:2] / self.max_vel
-        mask = (seq[:, 0:1] > 0).float()
+        x = torch.from_numpy(self.X[idx])   # [T,2,H,W]
+        y = torch.from_numpy(self.Y[idx])   # [T,1,H,W]
+        # normalize velocity to [-1,1]
+        y = 2 * (y - self.min_vel) / (self.max_vel - self.min_vel) - 1
+        # Mask where either of the two input channels is greater than 0.12
+        mask = ((x[:, 0:1] > 0.12) | (x[:, 1:2] > 0.12)).float()
         return x, y, mask
 
 # -----------------------------
-# Training & Eval
+# Training & evaluation
 # -----------------------------
 def train_one_epoch(model, loader, optimizer, device):
     model.train()
@@ -209,29 +213,36 @@ def evaluate(model, loader, device):
 # Main
 # -----------------------------
 if __name__ == "__main__":
-    path = "moving_mnist_2.npz"  # update path if needed
-    batch_size = 64
+    npz_path = "dataset_sequences_original.npz"
+    batch_size = 16
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dataset = MovingMNISTDataset(path)
+
+    dataset = NPZSequenceDataset(npz_path)
+    print("Dataset length:", len(dataset))
+    x, y, mask = dataset[0]
+    print("x.shape:", x.shape)
+    print("y.shape:", y.shape)
+    print("mask.shape:", mask.shape)
+
     n_train = int(0.8 * len(dataset))
     train_ds, val_ds = torch.utils.data.random_split(dataset, [n_train, len(dataset)-n_train])
+
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=True)
-    # Choose if to use skip LSTM
-    USE_SKIP_LSTM = True  # <-- change to False to disable skip-LSTM
-    model = TemporalUNetDualView(in_channels_per_sat=1, out_channels=1, base_ch=32, lstm_layers=1, use_skip_lstm=USE_SKIP_LSTM).to(device)
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
+
+    USE_SKIP_LSTM = True
+    model = TemporalUNetDualView(in_channels_per_sat=1, out_channels=1, base_ch=32,
+                                 lstm_layers=1, use_skip_lstm=USE_SKIP_LSTM).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-    EPOCHS = 20
-    for epoch in range(1, EPOCHS + 1):
+
+    EPOCHS = 5
+    for epoch in range(1, EPOCHS+1):
         tr = train_one_epoch(model, train_loader, optimizer, device)
         val = evaluate(model, val_loader, device)
-        print(f"Epoch {epoch}: train={tr:.4f} | val={val:.4f}")
+        print(f"Epoch {epoch}: train={tr:.6f} | val={val:.6f}")
+
     torch.save({
         'model_state': model.state_dict(),
-        'cfg': {'in_channels_per_sat': 1, 'out_channels': 1, 'use_skip_lstm': USE_SKIP_LSTM}
-    }, 'temporal_unet_convlstm_dualview.pt')
-    print("Saved model to temporal_unet_convlstm_dualview.pt")
+        'cfg': {'in_channels_per_sat':1, 'out_channels':1, 'use_skip_lstm':USE_SKIP_LSTM}
+    }, 'temporal_unet_convlstm_dualview_from_npz.pt')
+    print("Saved model to temporal_unet_convlstm_dualview_from_npz.pt")
