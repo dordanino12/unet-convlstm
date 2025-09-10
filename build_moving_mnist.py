@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torchvision import datasets, transforms
 
-def generate_moving_mnist(seq_len=10, num_samples=1000, image_size=64, num_digits=1):
+def generate_moving_mnist(seq_len=10, num_samples=1000, image_size=64, num_digits=2):
     mnist = datasets.MNIST(root="./data", train=True, download=True,
                            transform=transforms.ToTensor())
     digits = mnist.data.numpy()
@@ -32,7 +32,7 @@ def generate_moving_mnist(seq_len=10, num_samples=1000, image_size=64, num_digit
                 seq[t, y:y + 28, x:x + 28][mask] = digit_norm[mask]
 
                 # Assign velocity only where digit pixels are (not the whole patch)
-                velocity_map[t, y:y + 28, x:x + 28][mask] = vx
+                velocity_map[t, y:y + 28, x:x + 28][mask] += vx
 
                 # Update position
                 x += vx
@@ -58,10 +58,10 @@ def generate_moving_mnist(seq_len=10, num_samples=1000, image_size=64, num_digit
     return data
 
 if __name__ == "__main__":
-    seq_len = 20
-    num_samples = 5000
+    seq_len = 40
+    num_samples = 100
     data = generate_moving_mnist(seq_len=seq_len, num_samples=num_samples)
 
     # Save in npz format
-    np.savez_compressed("moving_mnist.npz", data=data)
+    np.savez_compressed("moving_mnist_2dig_40seq.npz", data=data)
     print("✅ Dataset with vx map saved to moving_mnist.npz")
