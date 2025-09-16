@@ -9,7 +9,7 @@ from tqdm import tqdm
 # Settings
 # -----------------------------
 folder_path = "/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_mitsuba_transformed_iso/"
-output_path = "data/dataset_sequences_original.npz"
+output_path = "data/dataset_sequences_slice_0.npz"
 seq_len = 20
 overlap = 10
 stride = seq_len - overlap
@@ -66,7 +66,8 @@ with tqdm(total=total_sequences, desc="Processing all sequences") as pbar:
                     data = pickle.load(pf)
 
                 tensors = data['tensors']
-                target = np.ma.getdata(data['target'])
+                #target = np.ma.getdata(data['target'])
+                target = data['target_slice'][8][0]  # target slices , first one
 
                 # Select cameras 0 & 2 (like in PKLSequenceDataset)
                 if "raw" in folder_path:

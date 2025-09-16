@@ -1,16 +1,21 @@
 import torch
 import numpy as np
-from main import TemporalUNetDualView
+from main import TemporalUNetDualView, compute_loss
 import os
 import matplotlib.pyplot as plt
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # -----------------------------
+# Control whether to use mask
+# -----------------------------
+USE_MASK = False  # set to False to ignore mask
+
+# -----------------------------
 # Load the model checkpoint
 # -----------------------------
 checkpoint = torch.load(
-    "models/temporal_unet_convlstm_dualview_from_npz.pt",
+    "models/temporal_unet_convlstm_dualview_from_npz_slice0_att.pt",
     map_location="cuda" if torch.cuda.is_available() else "cpu",
     weights_only=True
 )
@@ -33,7 +38,7 @@ model = model.to(device)
 # Load the NPZ dataset with percentile-based normalization
 # -----------------------------
 class NPZSequenceDataset(torch.utils.data.Dataset):
-    def __init__(self, npz_path, lower_percentile=0.2, upper_percentile=99.8, clip_outliers=True):
+    def __init__(self, npz_path, lower_percentile=0.1, upper_percentile=99.9, clip_outliers=True):
         data = np.load(npz_path)
         self.X = data["X"].astype(np.float32)  # [N, T, 2, H, W]
         self.Y = data["Y"].astype(np.float32)  # [N, T, 1, H, W]
@@ -65,9 +70,9 @@ class NPZSequenceDataset(torch.utils.data.Dataset):
         mask = ((x[:, 0:1] > 0.12) | (x[:, 1:2] > 0.12)).float()
         return x, y, mask
 
-npz_path = "data/dataset_sequences_original.npz"
+npz_path = "data/dataset_sequences_slice_0.npz"
 dataset = NPZSequenceDataset(npz_path)
-sequence_idx = 10
+sequence_idx = 20
 input_seq, gt_vel_seq, mask_seq = dataset[sequence_idx]
 T, C, H, W = input_seq.shape
 
@@ -81,8 +86,11 @@ gt_vel_denorm = 0.5 * (gt_vel_seq + 1) * (dataset.max_vel - dataset.min_vel) + d
 # -----------------------------
 for t_len in range(1, T + 1):
     x_input = input_seq[:t_len].unsqueeze(0).to(device)  # [1, t_len, 2, H, W]
+    mask_input = mask_seq[:t_len].unsqueeze(0).to(device) if USE_MASK else None
+
     with torch.no_grad():
         pred_seq, _ = model(x_input)
+
     pred_vel = torch.stack(pred_seq, dim=1).squeeze(0).cpu().numpy()  # [T,1,H,W]
 
     # Denormalize predicted velocities
@@ -93,7 +101,7 @@ for t_len in range(1, T + 1):
     last_gt = gt_vel_denorm[t_len - 1, 0].cpu().numpy()
     last_pred = pred_vel_denorm[t_len - 1, 0]
     last_mask = mask_seq[t_len - 1, 0].cpu().numpy()
-    last_pred_masked = last_pred * last_mask
+    last_pred_masked = last_pred * last_mask if USE_MASK else last_pred
 
     # Determine vmin/vmax for better visualization
     vmin_seq = min(last_gt.min(), last_pred.min())
@@ -120,9 +128,9 @@ for t_len in range(1, T + 1):
     axes[0, 1].axis('off')
     fig.colorbar(im1, ax=axes[0, 1], fraction=0.046, pad=0.04)
 
-    # Predicted velocity (masked)
+    # Predicted velocity (masked or unmasked)
     im3 = axes[0, 2].imshow(last_pred_masked, cmap='jet', vmin=vmin_seq, vmax=vmax_seq)
-    axes[0, 2].set_title("Predicted Velocity (Masked)")
+    axes[0, 2].set_title(f"Predicted Velocity {'(Masked)' if USE_MASK else '(No Mask)'}")
     axes[0, 2].axis('off')
     fig.colorbar(im3, ax=axes[0, 2], fraction=0.046, pad=0.04)
 
