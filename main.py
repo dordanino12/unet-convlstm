@@ -230,7 +230,7 @@ class NPZSequenceDataset(Dataset):
         if self.clip_outliers:
             y = torch.clamp(y, self.min_vel, self.max_vel)
         y = 2 * (y - self.min_vel) / (self.max_vel - self.min_vel) - 1
-        mask = ((x[:, 0:1] > 0.12) | (x[:, 1:2] > 0.12)).float()
+        mask = ((x[:, 0:1] > 0.12) | (x[:, 0:1] < -0.12) | (x[:, 1:2] > 0.12) | (x[:, 1:2] < -0.12)).float() # apply mask
         return x, y, mask
 
 
@@ -325,6 +325,7 @@ if __name__ == "__main__":
     npz_path = "data/dataset_sequences_slice_0.npz"
     batch_size = 16
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(device)
 
     dataset = NPZSequenceDataset(npz_path)
     print("Dataset length:", len(dataset))
@@ -350,7 +351,7 @@ if __name__ == "__main__":
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
 
-    EPOCHS = 5
+    EPOCHS = 10
     for epoch in range(1, EPOCHS + 1):
         tr = train_one_epoch(model, train_loader, optimizer, device, use_mask=USE_MASK)
         val = evaluate(model, val_loader, device, use_mask=USE_MASK)
@@ -359,5 +360,5 @@ if __name__ == "__main__":
     torch.save({
         'model_state': model.state_dict(),
         'cfg': {'in_channels_per_sat': 1, 'out_channels': 1, 'use_skip_lstm': USE_SKIP_LSTM}
-    }, 'models/temporal_unet_convlstm_dualview_from_npz_slice0_att.pt')
+    }, 'models/temporal_unet_convlstm_dualview_from_npz_slice0_att_score.pt')
     print("Saved model to temporal_unet_convlstm_dualview_from_npz_slice0_att.pt")
