@@ -340,7 +340,7 @@ if __name__ == "__main__":
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=True)
 
     USE_SKIP_LSTM = True
-    USE_MASK = False  # <-- control whether mask is used in loss
+    USE_MASK = True  # <-- control whether mask is used in loss
 
     model = TemporalUNetDualView(
         in_channels_per_sat=1,
@@ -349,16 +349,22 @@ if __name__ == "__main__":
         lstm_layers=1,
         use_skip_lstm=USE_SKIP_LSTM
     ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
 
-    EPOCHS = 10
+    best_val_loss = float('inf')
+    EPOCHS = 10 # You'll likely need more than 10
+
     for epoch in range(1, EPOCHS + 1):
         tr = train_one_epoch(model, train_loader, optimizer, device, use_mask=USE_MASK)
         val = evaluate(model, val_loader, device, use_mask=USE_MASK)
         print(f"Epoch {epoch}: train={tr:.6f} | val={val:.6f}")
 
-    torch.save({
-        'model_state': model.state_dict(),
-        'cfg': {'in_channels_per_sat': 1, 'out_channels': 1, 'use_skip_lstm': USE_SKIP_LSTM}
-    }, 'models/temporal_unet_convlstm_dualview_from_npz_slice0_att_score.pt')
-    print("Saved model to temporal_unet_convlstm_dualview_from_npz_slice0_att.pt")
+        if val < best_val_loss:
+            best_val_loss = val
+            print(f"  -> New best model saved with val_loss: {val:.6f}")
+            torch.save({
+                'model_state': model.state_dict(),
+                'cfg': {'in_channels_per_sat': 1, 'out_channels': 1, 'use_skip_lstm': USE_SKIP_LSTM}
+            }, 'models/temporal_unet_convlstm_dualview_from_npz_slice0_att_score_.pt')
+
+    print("Training complete. Best val loss:", best_val_loss)
