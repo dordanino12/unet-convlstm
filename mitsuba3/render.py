@@ -208,7 +208,7 @@ def main():
             'to_world': mi.Transform4f.look_at(
                 mi.Point3f(geo['sat_pos_m']),
                 mi.Point3f(geo['lookat_pos_m']),
-                mi.Point3f([0, 1, 0])  # This is the fix, matching the definition
+                mi.Point3f([0, -1, 0])  # This is the fix, matching the definition
             ),
             'film': {
                 'type': 'hdrfilm',
@@ -266,7 +266,7 @@ def main():
 
             # This transform defines the box's position and size in the world.
             # We scale a -1..+1 cube to our full world extents.
-            'to_world': mi.Transform.translate([0, 0, box_center_z])
+            'to_world': mi.Transform4f.translate([0, 0, box_center_z])
             .scale(world_extents_m),
         },
     }
