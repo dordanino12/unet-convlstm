@@ -99,18 +99,46 @@ class MitsubaRenderer:
             self.fov = 2 * np.arctan((self.W / 2) / (H_0 - self.cloud_zrange[1])) * (180 / np.pi)
             self.film_dim = self.cloud_width
 
+    # def create_sensors(self):
+    #     for i in range(len(self.overpass_indices)):
+    #         angle = self.sat_zenith[i]
+    #         sensor_rotation = mi.scalar_rgb.Transform4f.rotate(
+    #             [np.cos(self.sat_azimuth[i] * (np.pi / 180)), np.sin(self.sat_azimuth[i] * (np.pi / 180)), 0], angle)
+    #         sensor_to_world = mi.scalar_rgb.Transform4f.look_at(target=[0, 0, 0],
+    #                                                             origin=[self.sat_Wy[i], self.sat_Wx[i], self.sat_H[i]],
+    #                                                             up=[1, 0, 0])
+    #         self.sensors.append(mi.load_dict({
+    #             'type': 'perspective',
+    #             'fov': self.fov,
+    #             'to_world': sensor_rotation @ sensor_to_world,
+    #             'film': {
+    #                 'type': 'hdrfilm',
+    #                 'width': self.film_dim, 'height': self.film_dim,
+    #                 'filter': {'type': 'tent'}
+    #             }
+    #         }))
+
     def create_sensors(self):
+        # Calculate the cloud's center Z coordinate once
+        cloud_target_z = self.cloud_zcenter * 2
+
         for i in range(len(self.overpass_indices)):
-            angle = self.sat_zenith[i]
-            sensor_rotation = mi.scalar_rgb.Transform4f.rotate(
-                [np.cos(self.sat_azimuth[i] * (np.pi / 180)), np.sin(self.sat_azimuth[i] * (np.pi / 180)), 0], angle)
-            sensor_to_world = mi.scalar_rgb.Transform4f.look_at(target=[0, 0, 0],
-                                                                origin=[self.sat_Wy[i], self.sat_Wx[i], self.sat_H[i]],
-                                                                up=[1, 0, 0])
+            # --- THIS IS THE FIX ---
+            # Remove the extra 'sensor_rotation'
+            # 1. Set the correct 'target' (the cloud's center)
+            # 2. Use a standard 'up' vector (e.g., [0, 1, 0] for Y-up)
+            # 3. Use *only* the look_at transform
+
+            sensor_to_world = mi.scalar_rgb.Transform4f.look_at(
+                target=[0, 0, cloud_target_z],  # <-- BUG 1 FIX: Point at the cloud center
+                origin=[self.sat_Wy[i], self.sat_Wx[i], self.sat_H[i]],
+                up=[0, 1, 0]  # <-- BUG 2 FIX: Standard Y-up vector (adjust if needed)
+            )
+
             self.sensors.append(mi.load_dict({
                 'type': 'perspective',
                 'fov': self.fov,
-                'to_world': sensor_rotation @ sensor_to_world,
+                'to_world': sensor_to_world,  # <-- BUG 2 FIX: No extra rotation
                 'film': {
                     'type': 'hdrfilm',
                     'width': self.film_dim, 'height': self.film_dim,
@@ -172,6 +200,69 @@ class MitsubaRenderer:
                 self.cloud_zcenter = ((z[0] + z[-1]) / 2 + z_offset) / 1000
             self.update_required = True
 
+    # def set_the_scene(self, timestamp=None):
+    #
+    #     if timestamp is not None:
+    #         s_azimuth = self.sun_azimuth[timestamp]
+    #         s_zenith = self.sun_zenith[timestamp]
+    #     else:
+    #         s_azimuth = self.sun_azimuth
+    #         s_zenith = self.sun_zenith
+    #
+    #     scene_dict = {
+    #         'type': 'scene',
+    #         'integrator': {  # integrator for volumes. max_depth is -1 for maximal accuracy
+    #             'type': 'volpath',  # 'prbvolpath','volpath'
+    #             'max_depth': -1,
+    #             'rr_depth': 10000},
+    #         'object': {  # transparent cube to contain our volume. The interior is the VOL we wrote
+    #             'type': 'cube',
+    #             'bsdf': {'type': 'null'},
+    #             'to_world': mi.scalar_rgb.Transform4f.scale(self.W / 2 * 1e3 / self.scene_scale).translate(
+    #                 [0, 0, 2 * self.cloud_zcenter]).rotate([1, 0, 0], 0),
+    #             'interior': {
+    #                 'type': 'heterogeneous',
+    #                 'albedo': 1.0,
+    #                 'phase': {
+    #                     'type': 'hg',
+    #                     'g': self.g_value
+    #                 },
+    #                 'sigma_t': {
+    #                     'type': 'gridvolume',
+    #                     'filename': self.vol_path,
+    #                     'to_world': mi.scalar_rgb.Transform4f.rotate([0, 1, 0], -90).scale(
+    #                         self.W * 1e3 / self.scene_scale).translate(
+    #                         [-0.5 + self.cloud_zcenter, -0.5, -0.5]),
+    #                 },
+    #                 'scale': self.scene_scale
+    #             }
+    #         },
+    #         # 'emitter': {'type': 'constant'}, # constant lighting for testing
+    #         'emitter': {  # Distant directional emitter - emulated the sun
+    #             'type': 'directional',
+    #             'direction': [-np.sin(s_azimuth * np.pi / 180), np.cos(s_azimuth * np.pi / 180),
+    #                           -1 / np.tan((180 - s_zenith) * np.pi / 180)],
+    #             'irradiance': {
+    #                 'type': 'rgb',
+    #                 'value': 131.4,
+    #             }
+    #         },
+    #
+    #         'ocean': {  # trying to emulate the ocean
+    #             'type': 'cube',
+    #             'to_world': mi.scalar_rgb.Transform4f.scale((self.W / 2 + 4) * 1e3 / self.scene_scale).translate(
+    #                 [0, 0, -(self.W / 2 + 4) * 1e3 / self.scene_scale]),
+    #             'bsdf': {  # Smooth diffuse BSDF
+    #                 'type': 'diffuse',
+    #                 'reflectance': {
+    #                     'type': 'rgb',
+    #                     'value': 0.03
+    #                 }
+    #             }
+    #         }
+    #     }
+    #     return scene_dict
+
     def set_the_scene(self, timestamp=None):
 
         if timestamp is not None:
@@ -180,6 +271,19 @@ class MitsubaRenderer:
         else:
             s_azimuth = self.sun_azimuth
             s_zenith = self.sun_zenith
+
+        # --- Corrected Sun Direction Math ---
+        # Convert degrees to radians
+        az_rad = np.deg2rad(s_azimuth)
+        ze_rad = np.deg2rad(s_zenith)
+
+        # Standard spherical to cartesian "direction to" vector
+        # This assumes Z is up, Y is North (azimuth=0)
+        # The vector points *from* the sun *towards* the origin.
+        dir_x = -np.sin(ze_rad) * np.sin(az_rad)
+        dir_y = -np.sin(ze_rad) * np.cos(az_rad)
+        dir_z = -np.cos(ze_rad)  # Always negative (shining down from above)
+        # --- End of Fix ---
 
         scene_dict = {
             'type': 'scene',
@@ -195,10 +299,10 @@ class MitsubaRenderer:
                 'interior': {
                     'type': 'heterogeneous',
                     'albedo': 1.0,
-                    # 'phase': {
-                    #     'type': 'hg',
-                    #     'g': self.g_value
-                    # },
+                    'phase': {
+                        'type': 'hg',
+                        'g': self.g_value
+                    },
                     'sigma_t': {
                         'type': 'gridvolume',
                         'filename': self.vol_path,
@@ -212,8 +316,7 @@ class MitsubaRenderer:
             # 'emitter': {'type': 'constant'}, # constant lighting for testing
             'emitter': {  # Distant directional emitter - emulated the sun
                 'type': 'directional',
-                'direction': [-np.sin(s_azimuth * np.pi / 180), np.cos(s_azimuth * np.pi / 180),
-                              -1 / np.tan((180 - s_zenith) * np.pi / 180)],
+                'direction': [dir_x, dir_y, dir_z],  # <-- Use corrected direction
                 'irradiance': {
                     'type': 'rgb',
                     'value': 131.4,
