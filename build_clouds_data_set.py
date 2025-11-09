@@ -65,6 +65,13 @@ with tqdm(total=total_sequences, desc="Processing all sequences") as pbar:
                 with open(f, 'rb') as pf:
                     data = pickle.load(pf)
 
+                # -------------------explain of the data----------------- :
+                # tensors ,(2,3,128,128) images from 3 satellites  , from T , T + 20 locations
+                # target ,(128,1280 top cloud W
+                # envelope , heights of the top cloud
+                # target_slice , (8,128,128) different heights W
+                # -------------------------------------------------------
+
                 tensors = data['tensors']
                 #target = np.ma.getdata(data['target'])
                 target = data['target_slice'][8][0]  # target slices , first one
