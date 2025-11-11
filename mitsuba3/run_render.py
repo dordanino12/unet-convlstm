@@ -20,10 +20,11 @@ output_vol_file = 'temp/my_cloud.vol'  # A temporary file this script will creat
 os.makedirs('temp', exist_ok=True)
 
 # Define which rows from your CSV to use
-overpass_indices = [0, 1, 2, 15, 16, 17]
-overpass_indices = [0, 1, 2, 3, 4, 5]
-overpass_indices = [6, 7, 8, 9, 10, 11]
-overpass_indices = [9, 10, 11, 15, 16, 17]
+overpass_indices = [0, 1, 2, 9, 12, 15]
+#overpass_indices = [0, 3, 6, 9, 12, 15]
+#overpass_indices = [6, 7, 8, 9, 10, 11]
+#overpass_indices = [9, 10, 11, 15, 16, 17]
+#overpass_indices = [0, 1, 2, 30, 31, 32]
 #overpass_indices = [12,13,14, 15, 16, 17]
 #overpass_indices = [7, 8,9]
 #overpass_indices = [0, 1, 2]
@@ -43,7 +44,7 @@ renderer_params = {
     'pad_image': True,
     'dynamic_emitter': True,
     'centralize_cloud': True,
-    'bitmaps_required': True,
+    'bitmaps_required': False,
     'vol_path': output_vol_file
 }
 
@@ -117,7 +118,7 @@ else:
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     print("Displaying 2D render plot...")
-    plt.show()  # Show the 2D plot window
+    #plt.show()  # Show the 2D plot window
 
 first_tensor_data = tensor_stacks[0][0]
 print(f"Shape of the first tensor: {first_tensor_data.shape}")
@@ -274,7 +275,7 @@ def plot_scene_geometry(renderer, zoom_on_cloud=True):
 
     print(
         f"Displaying 3D debug plot ({'Zoomed on Cloud' if zoom_on_cloud else 'Global View'})... (You can click and drag this window)")
-    plt.show()
+    #plt.show()
 
 
 # --- Call the new 3D plot function ---
@@ -286,3 +287,8 @@ try:
 except Exception as e:
     print(f"Could not generate 3D plot: {e}")
     print("Check your 'renderer' object. Did 'read_overpass_csv' run correctly?")
+
+# <-- MODIFIED: Added this section -->
+# --- 10. Show all plots ---
+print("Displaying all plot windows at the same time...")
+plt.show()
