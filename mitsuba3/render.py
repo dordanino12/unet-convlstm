@@ -1,306 +1,354 @@
-import mitsuba as mi
+import os.path
+
 import numpy as np
+import scipy
 import pandas as pd
+from PIL import Image
+import struct
+import torch
 import os
+import mitsuba as mi
+import pickle
+
+if torch.cuda.is_available():
+    mi.set_variant('cuda_ad_rgb')
+else:
+    mi.set_variant('llvm_ad_rgb')
 
 
-def setup_mitsuba_variant(variant='scalar_rgb'):
-    """
-    Set the Mitsuba 3 variant.
-    'scalar_rgb' -> CPU-based, good for testing.
-    'cuda_ad_rgb' -> GPU-based, much faster if you have an NVIDIA GPU.
-    """
-    try:
-        mi.set_variant(variant)
-        print(f"Mitsuba variant set to: {variant}")
-    except Exception as e:
-        print(f"Error setting Mitsuba variant: {e}")
-        print("Please ensure Mitsuba 3 is installed correctly.")
-        exit()
+# mi.set_variant('llvm_ad_rgb')
+# from mitsuba import ScalarTransform4f
 
 
-def create_dummy_csv(filepath='viewing_geo.csv'):
-    """
-    Creates a dummy CSV file with one row of viewing geometry.
-    All coordinates are in ENU (East-North-Up).
-    """
-    print(f"Creating dummy CSV file at: {filepath}")
-    data = {
-        'utc time': ['2025-01-01T12:00:00'],
-        'sun zenith [deg]': [30.0],
-        'sun azimuth [deg]': [180.0],  # 180 deg = from the South
-        'sat zenith [deg]': [10.0],  # Nearly overhead
-        'sat azimuth [deg]': [0.0],
-        'scattering angle [deg]': [140.0],
-        'sat ENU coordinates [km]': [[2, 2, 2]],  # 800 km altitude
-        'lookat ENU coordinates [km]': [[0, 0, 0]]  # Looking at origin
-    }
+class MitsubaRenderer:
+    def __init__(self, overpass_csv, overpass_indices, spp, g_value=0, cloud_width=128, voxel_res=0.02, scene_scale=1e3,
+                 cloud_zrange=[2, 6],
+                 satellites=3, timestamps=2, pad_image=True, dynamic_emitter=True, centralize_cloud=True,
+                 bitmaps_required=True,
+                 vol_path=None):
+        self.overpass_csv = overpass_csv
+        self.overpass_indices = overpass_indices
+        self.spp = spp
+        self.g_value = g_value
+        self.cloud_width = cloud_width
+        self.voxel_res = voxel_res
+        self.scene_scale = scene_scale
+        self.cloud_zrange = cloud_zrange
+        self.satellites = satellites
+        self.timestamps = timestamps
+        self.pad_image = pad_image
+        self.dynamic_emitter = dynamic_emitter
+        self.centralize_cloud = centralize_cloud
+        self.bitmaps_required = bitmaps_required
+        self.vol_path = vol_path
 
-    # Workaround for pandas storing lists in cells
-    df = pd.DataFrame(data)
-    df['sat ENU coordinates [km]'] = df['sat ENU coordinates [km]'].astype(str)
-    df['lookat ENU coordinates [km]'] = df['lookat ENU coordinates [km]'].astype(str)
+        self.W = self.cloud_width * self.voxel_res
+        self.sat_Wx = []
+        self.sat_Wy = []
+        self.sat_H = []
+        self.sat_azimuth = []
+        self.sat_zenith = []
+        self.sun_azimuth = []
+        self.sun_zenith = []
 
-    df.to_csv(filepath, index=False)
+        self.cloud_zcenter = sum(cloud_zrange) / 2
 
+        self.sensors = []
+        self.fov = None
+        self.film_dim = None
 
-def load_viewing_geometry(filepath, row_index=0):
-    """
-    Loads a specific row from the viewing geometry CSV file.
-    Converts units (km -> m, deg -> rad).
-    """
-    print(f"Loading viewing geometry from: {filepath}")
-    if not os.path.exists(filepath):
-        create_dummy_csv(filepath)
+        self.scenes_dict = []
+        self.scenes = []
+        self.update_required = True
 
-    df = pd.read_csv(filepath)
-    if row_index >= len(df):
-        print(f"Error: Row index {row_index} is out of bounds for CSV file.")
-        return None
+    def read_overpass_csv(self):
+        satelite_df = pd.read_csv(self.overpass_csv)
+        idx = self.overpass_indices
 
-    row = df.iloc[row_index]
+        sat_coords_lst = [satelite_df.loc[i, "sat ENU coordinates [km]"] for i in idx]
+        self.sat_Wx = [float(coords[1:-1].split(',')[0]) for coords in sat_coords_lst]
+        self.sat_Wy = [float(coords[1:-1].split(',')[1]) for coords in sat_coords_lst]
+        self.sat_H = [float(coords[1:-1].split(',')[2]) for coords in sat_coords_lst]
 
-    # Helper to parse the coordinate strings
-    def parse_coord(coord_str):
-        return np.array([float(c) for c in coord_str.strip('[]').split(',')])
+        self.sat_azimuth = [float(satelite_df.loc[i, "sat azimuth [deg]"]) for i in idx]
+        self.sat_zenith = [float(satelite_df.loc[i, "sat zenith [deg]"]) for i in idx]
 
-    geo = {
-        'sun_zenith_rad': np.radians(row['sun zenith [deg]']),
-        'sun_azimuth_rad': np.radians(row['sun azimuth [deg]']),
-        'sat_pos_m': parse_coord(row['sat ENU coordinates [km]']) * 1000.0,
-        'lookat_pos_m': parse_coord(row['lookat ENU coordinates [km]']) * 1000.0,
-    }
-    return geo
+        if self.dynamic_emitter:
+            self.sun_azimuth = [float(satelite_df.loc[self.overpass_indices[i * self.satellites], "sun azimuth [deg]"])
+                                for i in range(self.timestamps)]
+            self.sun_zenith = [float(satelite_df.loc[self.overpass_indices[i * self.satellites], "sun zenith [deg]"])
+                               for i in range(self.timestamps)]
+        else:
+            self.sun_azimuth = float(satelite_df.loc[self.overpass_indices[0], "sun azimuth [deg]"])
+            self.sun_zenith = float(satelite_df.loc[self.overpass_indices[0], "sun zenith [deg]"])
 
+    def camera_params(self):
+        limit_idx = np.argmax(self.sat_zenith)
+        nadir_idx = np.argmin(self.sat_zenith)
 
-def get_sun_direction(zenith_rad, azimuth_rad):
-    """
-    Converts spherical coordinates (zenith, azimuth) to a Cartesian direction vector.
-    Assumes ENU: Azimuth from East (X), Zenith from Up (Z).
-    The vector points *from* the sun *towards* the origin.
-    """
-    x = np.sin(zenith_rad) * np.cos(azimuth_rad)
-    y = np.sin(zenith_rad) * np.sin(azimuth_rad)
-    z = np.cos(zenith_rad)
+        theta_z = self.sat_zenith[limit_idx]
+        H_z = self.sat_H[limit_idx]
+        H_0 = self.sat_H[nadir_idx]
+        Dz = np.tan(theta_z * (np.pi / 180)) * H_z
 
-    # The emitter's direction is where the light is *going*
-    # So we reverse the vector (from origin towards sun)
-    direction_to_sun = -np.array([x, y, z])
-    return mi.Vector3f(direction_to_sun)
+        if self.pad_image:
+            self.fov = 2 * (-theta_z + np.arctan((Dz + self.W / 2) / (H_z - self.cloud_zrange[1])) * (180 / np.pi))
+            self.film_dim = int(
+                np.ceil(2 * (H_z - self.cloud_zrange[1]) * np.tan(self.fov / 2 * np.pi / 180) / self.voxel_res))
+        else:
+            self.fov = 2 * np.arctan((self.W / 2) / (H_0 - self.cloud_zrange[1])) * (180 / np.pi)
+            self.film_dim = self.cloud_width
 
+    def create_sensors(self):
+        # Calculate the cloud's center Z coordinate once
+        cloud_target_z = self.cloud_zcenter * 2
 
-def generate_dummy_cloud_field(shape=(512, 512, 200)):
-    """
-    *** PLACEHOLDER FUNCTION ***
-    This function generates a dummy 3D cloud field.
-    You MUST replace this with your own function to load your data
-    (e.g., from .npy, .vdb, or other formats).
+        for i in range(len(self.overpass_indices)):
+            # --- THIS IS THE FIX ---
+            # Remove the extra 'sensor_rotation'
+            # 1. Set the correct 'target' (the cloud's center)
+            # 2. Use a standard 'up' vector (e.g., [0, 1, 0] for Y-up)
+            # 3. Use *only* the look_at transform
 
-    The output should be a 3D NumPy array of shape (512, 512, 200)
-    representing the scattering density.
-    """
-    print(f"Generating dummy 3D cloud field of shape {shape}")
-    print("!!! YOU MUST REPLACE THIS with your actual data loader !!!")
+            sensor_to_world = mi.scalar_rgb.Transform4f.look_at(
+                target=[0, 0, cloud_target_z],  # <-- BUG 1 FIX: Point at the cloud center
+                origin=[self.sat_Wy[i], self.sat_Wx[i], self.sat_H[i]],
+                up=[1, 0, 0]
+            )
 
-    # Create a simple "slab" of cloud
-    x, y, z = shape
-    density = np.zeros(shape, dtype=np.float32)
+            self.sensors.append(mi.load_dict({
+                'type': 'perspective',
+                'fov': self.fov,
+                'to_world': sensor_to_world,  # <-- BUG 2 FIX: No extra rotation
+                'film': {
+                    'type': 'hdrfilm',
+                    'width': self.film_dim, 'height': self.film_dim,
+                    'filter': {'type': 'tent'}
+                }
+            }))
 
-    # Define a cloud layer between z=50 and z=150
-    cloud_bottom_idx = 50
-    cloud_top_idx = 150
+    def write_vol_file(self, data=None, sample_path=None, param_type='beta_ext', sample_ext='pkl',
+                       z_offset=0, vol_path=None):
 
-    density[:, :, cloud_bottom_idx:cloud_top_idx] = 0.5  # Base density
+        if vol_path is not None:
+            self.vol_path = vol_path
 
-    # Add some simple noise for variation
-    # Create coordinates
-    X, Y, Z = np.meshgrid(
-        np.linspace(-1, 1, y),
-        np.linspace(-1, 1, x),
-        np.linspace(-1, 1, z),
-        indexing='xy'
-    )
+        if data is not None:
+            data = np.transpose(data, (1, 2, 0))
+        elif sample_path is None:
+            data = np.zeros((1, 1, 1, 1))
+        else:
+            if sample_ext is None:
+                sample_path = sample_path
+            else:
+                sample_path = sample_path + '.' + sample_ext
+            with open(sample_path, "rb") as f:
+                sample = pickle.load(f)
+            data = np.transpose(sample[param_type], (1, 2, 0))
 
-    # A simple procedural noise
-    noise = (np.sin(X * 10) * np.cos(Y * 10) + np.sin(Z * 5)) * 0.5 + 0.5
-    noise_slab = noise[:, :, cloud_bottom_idx:cloud_top_idx] * 0.5
+        # Ensure that the data is a 4D numpy array with shape (X, Y, Z, channels)
+        if len(data.shape) == 3:
+            data = np.expand_dims(data, axis=3)
+        elif len(data.shape) != 4:
+            raise ValueError("Data should be a 4D numpy array with shape (X, Y, Z, channels)")
+        # Ensure that the data type is float32
+        if data.dtype != np.float32:
+            data = np.fliplr(data.astype(np.float32))
 
-    density[:, :, cloud_bottom_idx:cloud_top_idx] += noise_slab
+        dir = os.path.dirname(self.vol_path)
+        if not os.path.exists(dir):
+            os.makedirs(dir)
 
-    # Clip to [0, max_density]
-    density = np.clip(density, 0, 1.0)
+        with open(self.vol_path, "wb") as f:
+            # Write the header information
+            f.write(b"VOL\x03")
+            f.write(struct.pack("<i", 1))  # Encoding identifier
+            f.write(struct.pack("<i", data.shape[2]))  # Number of cells along X
+            f.write(struct.pack("<i", data.shape[0]))  # Number of cells along Y
+            f.write(struct.pack("<i", data.shape[1]))  # Number of cells along Z
+            f.write(struct.pack("<i", data.shape[3]))  # Number of channels
 
-    # Scale density to be physically plausible
-    # This 'max_density_scale' is a critical parameter to tune.
-    # It represents the max extinction coefficient (per meter).
-    max_density_scale = 0.1  # 0.1/m
+            # Compute the bounding box of the data
+            bbox = np.array([0, 0, 0, data.shape[2], data.shape[0], data.shape[1]], dtype=np.float32)
+            f.write(struct.pack("<6f", *bbox))
 
-    return density * max_density_scale
+            # Write the binary data
+            data.tofile(f)
 
+        if not self.centralize_cloud:
+            if not (sample_path is None):
+                z = sample['z'][0]
+                self.cloud_zcenter = ((z[0] + z[-1]) / 2 + z_offset) / 1000
+            self.update_required = True
 
-def main():
-    # --- 1. Setup ---
-    setup_mitsuba_variant('scalar_rgb')
+    def set_the_scene(self, timestamp=None):
 
-    # --- 2. Define Scene Parameters ---
-    csv_file = 'viewing_geo.csv'
-    scene_index = 0  # Use the first row from the CSV
+        if timestamp is not None:
+            s_azimuth = self.sun_azimuth[timestamp]
+            s_zenith = self.sun_zenith[timestamp]
+        else:
+            s_azimuth = self.sun_azimuth
+            s_zenith = self.sun_zenith
 
-    # Your grid parameters
-    grid_shape_voxels = (512, 512, 200)
-    voxel_size_m = (20.0, 20.0, 20.0)
+        # --- Corrected Sun Direction Math ---
+        # Convert degrees to radians
+        az_rad = np.deg2rad(s_azimuth)
+        ze_rad = np.deg2rad(s_zenith)
 
-    # Total world size of the grid in meters
-    world_size_m = np.array(grid_shape_voxels) * np.array(voxel_size_m)
-    world_extents_m = world_size_m / 2.0  # Half-extents from center
+        # Standard spherical to cartesian "direction to" vector
+        # This assumes Z is up, Y is North (azimuth=0)
+        # The vector points *from* the sun *towards* the origin.
+        dir_x = -np.sin(ze_rad) * np.sin(az_rad)
+        dir_y = -np.sin(ze_rad) * np.cos(az_rad)
+        dir_z = np.cos(ze_rad)
 
-    # --- 3. Load Data ---
-    geo = load_viewing_geometry(csv_file, scene_index)
-    if geo is None:
-        return
-
-    sun_direction = get_sun_direction(geo['sun_zenith_rad'], geo['sun_azimuth_rad'])
-
-    # Load your 3D data
-    # *** REPLACE THIS CALL ***
-    # This should return a (512, 512, 200) np.float32 array.
-    # The values should be the scattering density (sigma_s) in units of 1/meter.
-    # You might need to scale your raw 'QV' or 'QR' data.
-    density_data_numpy = generate_dummy_cloud_field(grid_shape_voxels)
-
-    # Convert NumPy array to a Mitsuba VolumeGrid object
-    # Mitsuba's VolumeGrid constructor expects data in (z, y, x) order.
-    # Let's ensure our data is (x, y, z) and then transpose if needed.
-    # The dummy data is (x, y, z), so we transpose to (z, y, x).
-    density_volume = mi.VolumeGrid(density_data_numpy.transpose(2, 1, 0))
-
-    # --- 4. Define Mitsuba Scene Dictionary ---
-    print("Defining Mitsuba scene...")
-
-    # Center the cloud box at z = half_height, so it rests on the z=0 plane
-    box_center_z = world_extents_m[2]
-
-    print(mi.Point3f(geo['sat_pos_m']))
-    print(mi.Point3f(geo['lookat_pos_m']))
-    print(mi.Point3f([0, 1, 0]))
-
-    scene_dict = {
-        'type': 'scene',
-
-        # Integrator: Volumetric Path Tracer
-        'integrator': {
-            'type': 'volpath',
-            'max_depth': 16,
-        },
-
-        # Emitter: The Sun
-        'emitter': {
-            'type': 'directional',
-            'direction': sun_direction,
-            # Adjust irradiance to make the scene brighter/dimmer
-            'irradiance': {'type': 'rgb', 'value': 20.0},
-        },
-
-        # Sensor: The Satellite
-        'sensor': {
-            'type': 'perspective',
-            'fov': 30,  # Field of View (degrees), adjust as needed
-            'to_world': mi.Transform4f.look_at(
-                mi.Point3f(geo['sat_pos_m']),
-                mi.Point3f(geo['lookat_pos_m']),
-                mi.Point3f([0, -1, 0])  # This is the fix, matching the definition
-            ),
-            'film': {
-                'type': 'hdrfilm',
-                'width': 1024,
-                'height': 768,
-                'rfilter': {'type': 'gaussian'},
+        scene_dict = {
+            'type': 'scene',
+            'integrator': {  # integrator for volumes. max_depth is -1 for maximal accuracy
+                'type': 'volpath',  # 'prbvolpath','volpath'
+                'max_depth': -1,
+                'rr_depth': 10000},
+            # --- [NEW BLOCK] ---
+            # This object represents the low-density "air"
+            # that fills the entire scene.
+            'atmosphere': {
+                'type': 'cube',
+                'bsdf': {'type': 'null'},  # Invisible container
+                # This transform creates a massive 1000km-wide cube
+                # centered at the world origin, filling the whole scene.
+                'to_world': mi.scalar_rgb.Transform4f.scale(500),
+                'interior': {
+                    'type': 'homogeneous',
+                    'albedo': {
+                        'type': 'rgb',
+                        'value': 1.0
+                    },  # Pure white scattering
+                    'phase': {
+                        'type': 'hg',
+                        'g': 0.0  # Isotropic scattering (g=0) is a good
+                        # approximation for air, scattering light
+                        # equally in all directions.
+                    },
+                    'sigma_t': {
+                        'type': 'rgb',
+                        'value': 0.00001
+                    }
+                }
             },
-            'sampler': {
-                'type': 'independent',
-                'sample_count': 64,  # Increase for less noise, but longer renders
+            # --- [END OF MODIFICATION] ---
+            'object': {  # transparent cube to contain our volume. The interior is the VOL we wrote
+                'type': 'cube',
+                'bsdf': {'type': 'null'},
+                'to_world': mi.scalar_rgb.Transform4f.scale(self.W / 2 * 1e3 / self.scene_scale).translate(
+                    [0, 0, 2 * self.cloud_zcenter]).rotate([1, 0, 0], 0),
+                'interior': {
+                    'type': 'heterogeneous',
+                    'albedo': 1.0,
+                    'phase': {
+                        'type': 'hg',
+                        'g': self.g_value
+                    },
+                    'sigma_t': {
+                        'type': 'gridvolume',
+                        'filename': self.vol_path,
+                        'to_world': mi.scalar_rgb.Transform4f.rotate([0, 1, 0], -90).scale(
+                            self.W * 1e3 / self.scene_scale).translate(
+                            [-0.5 + self.cloud_zcenter, -0.5, -0.5]),
+                    },
+                    'scale': self.scene_scale
+                }
             },
-        },
-
-        # Medium: The Cloud
-        # We define this as a named medium to be referenced by the box
-        'cloud_medium': {
-            'type': 'heterogeneous',
-            'scale': 1.0,  # You can scale the density array here
-            'sigma_a': {'type': 'rgb', 'value': 0.0},  # No absorption (white cloud)
-
-            # Scattering (sigma_s) is defined by our 3D grid
-            'sigma_s': {
-                'type': 'grid',
-                'grid': '$density_volume_param',  # References the object we pass in
-                # This transform maps the [0, 1]^3 grid coordinates
-                # to the full world-space box.
-                'to_world': mi.Transform4f.translate(mi.Vector3f([
-                    -world_extents_m[0],
-                    -world_extents_m[1],
-                    0
-                ]))
-                .scale(mi.Vector3f([
-                    world_size_m[0],
-                    world_size_m[1],
-                    world_size_m[2]
-                ])),
-            },
-
-            # Phase Function: How light scatters inside the medium
-            'phase': {
-                'type': 'henyey_greenstein',
-                'g': 0.85,  # Strong forward scattering, typical for clouds
-            },
-        },
-
-        # Shape: The Box that contains the cloud medium
-        'cloud_box': {
-            'type': 'cube',
-
-            # Assign the medium to the *inside* of the box
-            'interior': {
-                'type': 'ref',
-                'id': 'cloud_medium',  # References the medium named 'cloud_medium'
+            # 'emitter': {'type': 'constant'}, # constant lighting for testing
+            'emitter': {  # Distant directional emitter - emulated the sun
+                'type': 'directional',
+                'direction': [dir_x, dir_y, dir_z],  # <-- Use corrected direction
+                'irradiance': {
+                    'type': 'rgb',
+                    'value': 131.4,
+                }
             },
 
-            # This transform defines the box's position and size in the world.
-            # We scale a -1..+1 cube to our full world extents.
-            'to_world': mi.Transform4f.translate([0, 0, box_center_z])
-            .scale(world_extents_m),
-        },
-    }
+            'ocean': {  # trying to emulate the ocean
+                'type': 'cube',
+                'to_world': mi.scalar_rgb.Transform4f.scale((self.W / 2 + 4) * 1e3 / self.scene_scale).translate(
+                    [0, 0, -(self.W / 2 + 4) * 1e3 / self.scene_scale]),
+                'bsdf': {  # Smooth diffuse BSDF
+                    'type': 'diffuse',
+                    'reflectance': {
+                        'type': 'rgb',
+                        'value': 0.03
+                    }
+                }
+            }
+        }
+        return scene_dict
 
-    # --- 5. Load Scene and Render ---
-    print("Loading scene into Mitsuba...")
-    # Pass the Python VolumeGrid object to `load_dict`
-    # The key 'density_volume_param' must match the '$' variable in the dict
-    try:
-        scene = mi.load_dict(
-            scene_dict,
-            density_volume_param=density_volume
-        )
-    except Exception as e:
-        print(f"Error loading scene dictionary: {e}")
-        print("This often happens if the 'density_volume_param' does not match")
-        print("or if the Mitsuba variant is not set correctly.")
-        return
+    def set_scenes(self):
 
-    print("Starting render (this may take a while)...")
-    # The 'spp' (samples per pixel) here overrides the sampler's 'sample_count'
-    image = mi.render(scene, spp=64)
+        if self.dynamic_emitter:
+            for timestamp in range(self.timestamps):
+                ref_scene = self.set_the_scene(timestamp=timestamp)
+                self.scenes_dict.append(ref_scene)
+                self.scenes.append(mi.load_dict(ref_scene))
+        else:
+            ref_scene = self.set_the_scene(timestamp=None)
+            self.scenes_dict.append(ref_scene)
+            self.scenes.append(mi.load_dict(ref_scene))
 
-    # --- 6. Save Output ---
-    output_filename = 'cloud_render.png'
-    print(f"Render complete. Saving image to: {output_filename}")
-    mi.util.write_bitmap(output_filename, image)
-    print("Done.")
+    def update_scenes(self, g_value=None):
+        if g_value is not None:
+            self.g_value = g_value
+            self.update_required = True
+        if self.update_required:
+            if self.dynamic_emitter:
+                for timestamp in range(self.timestamps):
+                    ref_scene = self.set_the_scene(timestamp=timestamp)
+                    self.scenes_dict[timestamp] = ref_scene
+                    self.scenes[timestamp] = mi.load_dict(ref_scene)
+            else:
+                ref_scene = self.set_the_scene(timestamp=None)
+                self.scenes_dict[0] = ref_scene
+                self.scenes[0] = mi.load_dict(ref_scene)
+        else:
+            if self.dynamic_emitter:
+                for timestamp in range(self.timestamps):
+                    self.scenes[timestamp] = mi.load_dict(self.scenes_dict[timestamp])
+            else:
+                self.scenes[0] = mi.load_dict(self.scenes_dict[0])
 
+    def render_scenes(self, spp=None):
+        if spp is not None:
+            self.spp = spp
 
-if __name__ == "__main__":
-    main()
+        tensor_stacks = []
+        bitmap_stacks = []
 
+        for time_part in range(self.timestamps):
+            tensors, bitmaps = self.render_scene(time_part, spp=None)
+            tensor_stacks.append(tensors)
+            bitmap_stacks.append(bitmaps)
+        return tensor_stacks, bitmap_stacks
 
+    def render_scene(self, time_part, spp=None):
+        if spp is not None:
+            self.spp = spp
 
+        tensors = np.array([]).reshape((0, self.film_dim, self.film_dim))
+        bitmaps = np.array([]).reshape((0, self.film_dim, self.film_dim))
+        for sat in range(self.satellites):
+            im_raw = mi.render(self.scenes[time_part * self.dynamic_emitter],
+                               sensor=self.sensors[time_part * self.satellites + sat], spp=self.spp)
+            im_gray = im_raw[:, :, 0]
+            # im_gray = np.array(
+            #     Image.fromarray((np.array(im_raw) / np.max(im_raw) * 255).astype(np.uint8)).convert('L'))
+            ##### should I divide by 255 again?
+            tensors = np.concatenate((tensors, np.expand_dims(np.array(im_gray), 0)), axis=0)
 
+            if self.bitmaps_required:
+                bitmap_raw = mi.util.convert_to_bitmap(im_raw)  # , 'uint8_srgb')
+                bitmap_gray = np.array(Image.fromarray(np.array(bitmap_raw)).convert('L'))
+                bitmaps = np.concatenate((bitmaps, np.expand_dims(bitmap_gray, 0)), axis=0)
+            else:
+                bitmaps = None
 
+        return tensors, bitmaps
