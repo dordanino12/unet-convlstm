@@ -1,5 +1,5 @@
 # Original imports
-from rednder_from_udi_class import MitsubaRenderer
+from render import MitsubaRenderer
 import numpy as np
 from PIL import Image
 import os  # <-- Added import
@@ -12,7 +12,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 # --- 1. Define Your Input Data Paths ---
 # You must have these files.
-csv_file = '/home/danino/PycharmProjects/pythonProject/data/Udi_3satellites_overpass.csv'
+csv_file = '/home/danino/PycharmProjects/pythonProject/data/debug.csv'
 # This file is no longer used in this script
 # cloud_data_file = '/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_3D/BOMEX_512x512x200_20m_20m_1s_512_0000005300_5_2'
 output_vol_file = 'temp/my_cloud.vol'  # A temporary file this script will create
@@ -21,27 +21,27 @@ output_vol_file = 'temp/my_cloud.vol'  # A temporary file this script will creat
 os.makedirs('temp', exist_ok=True)
 
 # Define which rows from your CSV to use
-overpass_indices = [0, 1, 2, 15, 16, 17]
-overpass_indices = [0, 3, 6, 9, 12, 15]
+#overpass_indices = [0, 1, 2, 15, 16, 17]
+#overpass_indices = [0, 3, 6, 9, 12, 15]
 # overpass_indices = [6, 7, 8, 9, 10, 11]
 # overpass_indices = [9, 10, 11, 15, 16, 17]
-# overpass_indices = [0, 1, 2, 30, 31, 32]
+overpass_indices = [0, 1, 2, 3, 4, 5]
 # overpass_indices = [12,13,14, 15, 16, 17]
-# overpass_indices = [7, 8,9]
+# overpass_indices = [7, 8,9]q
 # overpass_indices = [0, 1, 2]
 
 # --- 2. Set Up the Renderer Parameters ---
 renderer_params = {
     'overpass_csv': csv_file,
     'overpass_indices': overpass_indices,
-    'spp': 8,  # <-- Lowered SPP for a fast test
-    'g_value': 0,
+    'spp': 248,  # <-- Lowered SPP for a fast test
+    'g_value': 0.7,
     'cloud_width': 128,
     'voxel_res': 0.02,
     'scene_scale': 1000.0,
     'cloud_zrange': [0.0, 4.0],
-    'satellites': 2,
-    'timestamps': 3,
+    'satellites': 3,
+    'timestamps': 2,
     'pad_image': True,
     'dynamic_emitter': True,
     'centralize_cloud': True,
@@ -71,56 +71,100 @@ try:
     D_voxels = 200
     print(f"Creating synthetic grid of size: (X={W_voxels}, Y={H_voxels}, Z={D_voxels})")
 
-    # 2. Create an empty 3D array (in X, Y, Z order for clarity)
+    # 2. Create an empty 3D array (in X, Y, Z order)
     synthetic_data_xyz = np.zeros((W_voxels, H_voxels, D_voxels), dtype=np.float32)
 
-    # 3. Create three "axes" (X, Y, Z) with different densities
+    # 3. Get center coordinates
     center_x, center_y, center_z = W_voxels // 2, H_voxels // 2, D_voxels // 2
-    thickness = 4  # Make the lines voxels thick
 
-    print("Drawing synthetic axes (X=1.0, Y=2.0, Z=3.0)...")
+    print("Drawing synthetic ball, cube, and pyramid...")
 
-    # X-axis (density 1.0) - Shortest
-    x_len = 60
+    # --- Create coordinate indices for all voxels (used for ball and pyramid) ---
+    x, y, z = np.indices(synthetic_data_xyz.shape)
+
+    # --- Create the Ball (Sphere) ---
+    # We will place the sphere to the left
+    sphere_radius = 20
+    sphere_density = 0.1
+    sphere_center = (center_x - 40, center_y, center_z)
+
+    # Create a boolean mask for all voxels inside the sphere's radius
+    mask_sphere = ((x - sphere_center[0]) ** 2 +
+                   (y - sphere_center[1]) ** 2 +
+                   (z - sphere_center[2]) ** 2) <= sphere_radius ** 2
+
+    # Apply the density to the voxels within the mask
+    synthetic_data_xyz[mask_sphere] = sphere_density
+    print(f"Added ball with density {sphere_density} at {sphere_center}")
+
+    # --- Create the Cube ---
+    # We will place the cube in the middle
+    cube_side = 30
+    half_side = cube_side // 2
+    cube_density = 0.1
+    cube_center = (center_x, center_y, center_z)
+
+    # Calculate the slicing indices for the cube
+    x_start = np.clip(cube_center[0] - half_side, 0, W_voxels)
+    x_end = np.clip(cube_center[0] + half_side, 0, W_voxels)
+    y_start = np.clip(cube_center[1] - half_side, 0, H_voxels)
+    y_end = np.clip(cube_center[1] + half_side, 0, H_voxels)
+    z_start = np.clip(cube_center[2] - half_side, 0, D_voxels)
+    z_end = np.clip(cube_center[2] + half_side, 0, D_voxels)
+
+    # Apply the density using slicing
     synthetic_data_xyz[
-    center_x: center_x + x_len,
-    center_y - thickness: center_y + thickness,
-    center_z - thickness: center_z + thickness
-    ] = 0.1
+    x_start:x_end,
+    y_start:y_end,
+    z_start:z_end
+    ] = cube_density
+    print(f"Added cube with density {cube_density} at {cube_center}")
 
-    # Y-axis (density 2.0) - Medium
-    y_len = 10
-    synthetic_data_xyz[
-    center_x - thickness: center_x + thickness,
-    center_y: center_y + y_len,
-    center_z - thickness: center_z + thickness
-    ] = 0.1
+    # --- Create the Pyramid ---
+    # We will place the pyramid to the right
+    pyramid_density = 0.1
+    pyramid_height = 40
+    pyramid_base_side = 40
 
-    # Z-axis (density 3.0) - Longest
-    z_len = 30
-    synthetic_data_xyz[
-    center_x - thickness: center_x + thickness,
-    center_y - thickness: center_y + thickness,
-    center_z: center_z + z_len
-    ] = 0.1
+    # Center the pyramid's base
+    pyramid_center_x = center_x + 40
+    pyramid_center_y = center_y
+    # Let's align the pyramid's base Z with the cube's base Z
+    pyramid_base_z_start = z_start
+    pyramid_apex_z = pyramid_base_z_start + pyramid_height
 
-    print(f"Added synthetic axes with densities 1.0, 2.0, 3.0.")
+    # h is the height from the base for each voxel (as a 3D array)
+    h = z - pyramid_base_z_start
 
-    # 4. Transpose data to the (Z, Y, X) format that the .pkl file would have
-    # This is the format 'renderer.write_vol_file' expects
-    # (X, Y, Z) -> (Z, Y, X)
-    print("Transposing synthetic data to (Z, Y, X) for the class's writer...")
-    synthetic_data_for_class = synthetic_data_xyz.transpose(2, 1, 0)
-    print(f"Data shape is now: {synthetic_data_for_class.shape}")
+    # L_h is the side length of the pyramid's cross-section at height h
+    # We use np.maximum to avoid negative side lengths
+    L_h = pyramid_base_side * (1.0 - h / pyramid_height)
+    half_L_h = np.maximum(0, L_h / 2.0)
 
-    # 5. Call the renderer's write_vol_file method with our synthetic data
+    # Create the pyramid mask
+    mask_z_range = (z >= pyramid_base_z_start) & (z < pyramid_apex_z)
+    mask_x_bound = np.abs(x - pyramid_center_x) <= half_L_h
+    mask_y_bound = np.abs(y - pyramid_center_y) <= half_L_h
+
+    mask_pyramid = mask_z_range & mask_x_bound & mask_y_bound
+
+    synthetic_data_xyz[mask_pyramid] = pyramid_density
+    print(f"Added pyramid with density {pyramid_density} centered at ({pyramid_center_x}, {pyramid_center_y})")
+
+    # The synthetic data was created as (X, Y, Z) for easier indexing.
+    # We now transpose it to (Z, X, Y) as requested for the write_vol_file function.
+    print("Transposing data from (X, Y, Z) to (Z, X, Y)...")
+    synthetic_data_zxy = np.transpose(synthetic_data_xyz, (2, 0, 1))
+    print(f"Original shape (X,Y,Z): {synthetic_data_xyz.shape}, New shape (Z,X,Y): {synthetic_data_zxy.shape}")
+
+    # 5. Call the renderer's write_vol_file method with the (Z, X, Y) data
     print(f"Calling renderer.write_vol_file, saving to {output_vol_file}")
-    renderer.write_vol_file(data=synthetic_data_for_class, vol_path=output_vol_file)
+    renderer.write_vol_file(data=synthetic_data_zxy, vol_path=output_vol_file)
     print("Synthetic .vol file written successfully.")
 
 except Exception as e:
-    print(f"Error creating synthetic cloud: {e}")
-    print("Please ensure 'numpy as np' is imported.")
+    print(f"An error occurred during synthetic data creation: {e}")
+    # Handle the error as needed
 
 # --- 5. [ORIGINAL - NOW COMMENTED OUT] ---
 # print(f"Loading cloud data from '{cloud_data_file}'...")

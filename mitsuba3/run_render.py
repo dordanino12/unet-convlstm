@@ -1,5 +1,5 @@
 # Original imports
-from rednder_from_udi_class import MitsubaRenderer
+from render import MitsubaRenderer
 import numpy as np
 from PIL import Image
 import os  # <-- Added import
@@ -13,6 +13,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 # --- 1. Define Your Input Data Paths ---
 # You must have these files.
 csv_file = '/home/danino/PycharmProjects/pythonProject/data/Udi_3satellites_overpass.csv'
+
 cloud_data_file = '/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_3D/BOMEX_512x512x200_20m_20m_1s_512_0000005300_5_2'  # This is the pkl file you have
 output_vol_file = 'temp/my_cloud.vol'  # A temporary file this script will create
 
@@ -29,11 +30,12 @@ overpass_indices = [0, 1, 2, 9, 12, 15]
 #overpass_indices = [7, 8,9]
 #overpass_indices = [0, 1, 2]
 
+
 # --- 2. Set Up the Renderer Parameters ---
 renderer_params = {
     'overpass_csv': csv_file,
     'overpass_indices': overpass_indices,
-    'spp': 1024,
+    'spp': 512,
     'g_value': 0.7,
     'cloud_width': 128,
     'voxel_res': 0.02,
