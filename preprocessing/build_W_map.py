@@ -47,7 +47,7 @@ class CloudRayCaster:
         cam_dir = (look_at - cam_pos)
         cam_dir = cam_dir / np.linalg.norm(cam_dir)
 
-        world_up = np.array([1, 0, 0])
+        world_up = np.array([-1, 0, 0])
         # if np.abs(np.dot(cam_dir, world_up)) > 0.99:
         #     world_up = np.array([0, 1, 0])
 
@@ -63,7 +63,7 @@ class CloudRayCaster:
 
         i, j = np.meshgrid(np.arange(W), np.arange(H))
 
-        x = ((2 * (i + 0.5) / W - 1) * aspect_ratio * scale)
+        x = -((2 * (i + 0.5) / W - 1) * aspect_ratio * scale)
         y = (1 - 2 * (j + 0.5) / H) * scale
 
         rays_d = x[..., np.newaxis] * cam_right + \
@@ -142,7 +142,7 @@ class CloudRayCaster:
         sampled_beta[~in_bounds_mask] = 0
 
         # 5. Find First Hit
-        hit_cloud = sampled_beta > 1e-5
+        hit_cloud = sampled_beta > 0
         first_hit_idx = np.argmax(hit_cloud, axis=1)
         has_hit = np.any(hit_cloud, axis=1)
 
@@ -170,7 +170,7 @@ if __name__ == "__main__":
 
     # Define Camera
     # Camera is at (0,0,600) -> Center X, Center Y, 600m Height
-    camera_pos = [0, 0, 600000] # 600km
+    camera_pos = [700000, 700000, 600000] # 600km if i asume that in the csv file the coords are [x,y,z] here put [-y , x , z]
 
     # Look slightly up to catch more clouds if needed, or straight ahead
     # If we look at (0, 0, 600) we look straight forward relative to camera height
@@ -193,4 +193,11 @@ if __name__ == "__main__":
     plt.imshow(w_map, cmap=current_cmap, vmin=-2, vmax=2)
     plt.colorbar(label='Vertical Velocity (W) [m/s]')
     plt.title(f"Velocity Map (W)\nCam: {camera_pos}")
+
+    # Option B: Save just the raw image content (no axes, exact resolution)
+    # This maps the w_map values to colors using the 'jet' colormap
+    output_filename_raw = "/home/danino/PycharmProjects/pythonProject/data/output/velocity_map_raw.png"
+    plt.imsave(output_filename_raw, w_map, cmap=current_cmap, vmin=-2, vmax=2)
+    print(f"Saved raw image to: {output_filename_raw}")
+
     plt.show()

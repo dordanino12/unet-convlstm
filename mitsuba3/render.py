@@ -21,8 +21,8 @@ else:
 
 
 class MitsubaRenderer:
-    def __init__(self, overpass_csv, overpass_indices, spp, g_value=0, cloud_width=128, voxel_res=0.02, scene_scale=1e3,
-                 cloud_zrange=[2, 6],
+    def __init__(self, overpass_csv, overpass_indices, spp, g_value=0, cloud_width=128, image_res=256, voxel_res=0.02, scene_scale=1e3,
+                 cloud_zrange=[0, 4],
                  satellites=3, timestamps=2, pad_image=True, dynamic_emitter=True, centralize_cloud=True,
                  bitmaps_required=True,
                  vol_path=None):
@@ -30,8 +30,8 @@ class MitsubaRenderer:
         self.overpass_indices = overpass_indices
         self.spp = spp
         self.g_value = g_value
-        self.cloud_width = cloud_width
-        self.voxel_res = voxel_res
+        self.cloud_width = cloud_width # 128 pixels
+        self.voxel_res = voxel_res # 0.02 km per pixel
         self.scene_scale = scene_scale
         self.cloud_zrange = cloud_zrange
         self.satellites = satellites
@@ -42,7 +42,7 @@ class MitsubaRenderer:
         self.bitmaps_required = bitmaps_required
         self.vol_path = vol_path
 
-        self.W = self.cloud_width * self.voxel_res
+        self.W = self.cloud_width * self.voxel_res # km for all the image
         self.sat_Wx = []
         self.sat_Wy = []
         self.sat_H = []
@@ -55,7 +55,7 @@ class MitsubaRenderer:
 
         self.sensors = []
         self.fov = None
-        self.film_dim = None
+        self.film_dim = image_res
 
         self.scenes_dict = []
         self.scenes = []
@@ -93,15 +93,15 @@ class MitsubaRenderer:
 
         if self.pad_image:
             self.fov = 2 * (-theta_z + np.arctan((Dz + self.W / 2) / (H_z - self.cloud_zrange[1])) * (180 / np.pi))
-            self.film_dim = int(
-                np.ceil(2 * (H_z - self.cloud_zrange[1]) * np.tan(self.fov / 2 * np.pi / 180) / self.voxel_res))
+            #self.film_dim = int(
+            #    np.ceil(2 * (H_z - self.cloud_zrange[1]) * np.tan(self.fov / 2 * np.pi / 180) / self.voxel_res))
         else:
-            self.fov = 2 * np.arctan((self.W / 2) / (H_0 - self.cloud_zrange[1])) * (180 / np.pi)
-            self.film_dim = self.cloud_width
+            self.fov = 2 * np.arctan((self.W / 2) / (H_0 - self.cloud_zrange[1])) * (180 / np.pi) # this in degree unit
+            #self.film_dim = self.cloud_width
 
     def create_sensors(self):
         # Calculate the cloud's center Z coordinate once
-        cloud_target_z = self.cloud_zcenter * 2
+        cloud_target_z = self.cloud_zcenter * 2.5
 
         for i in range(len(self.overpass_indices)):
             # --- THIS IS THE FIX ---
@@ -111,7 +111,7 @@ class MitsubaRenderer:
             # 3. Use *only* the look_at transform
 
             sensor_to_world = mi.scalar_rgb.Transform4f.look_at(
-                target=[0, 0, cloud_target_z],  # <-- BUG 1 FIX: Point at the cloud center
+                target=[0, 0,cloud_target_z],  # <-- BUG 1 FIX: Point at the cloud center
                 origin=[self.sat_Wy[i], self.sat_Wx[i], self.sat_H[i]],
                 up=[1, 0, 0]
             )
@@ -144,9 +144,11 @@ class MitsubaRenderer:
                 sample_path = sample_path + '.' + sample_ext
             with open(sample_path, "rb") as f:
                 sample = pickle.load(f)
-            data = np.transpose(sample[param_type], (1, 2, 0))
+            data = np.transpose(sample[param_type], (2, 1, 0)) # smaple is [Z,Y,X]
+            # data = np.transpose(sample[param_type], (1, 2, 0)) # smaple is [Z,Y,X]
 
-        # Ensure that the data is a 4D numpy array with shape (X, Y, Z, channels)
+
+        # Ensure that the data is a 4D numpy array with shape (Y, X, Z, channels)
         if len(data.shape) == 3:
             data = np.expand_dims(data, axis=3)
         elif len(data.shape) != 4:
@@ -167,9 +169,17 @@ class MitsubaRenderer:
             f.write(struct.pack("<i", data.shape[0]))  # Number of cells along Y
             f.write(struct.pack("<i", data.shape[1]))  # Number of cells along Z
             f.write(struct.pack("<i", data.shape[3]))  # Number of channels
+            # --- FIX 2: WRITE DIMENSIONS CORRECTLY (X, Y, Z) ---
+            # # data is now (X, Y, Z, C)
+            # f.write(struct.pack("<i", data.shape[1]))  # Size y
+            # f.write(struct.pack("<i", data.shape[0]))  # Size Y
+            # f.write(struct.pack("<i", data.shape[2]))  # Size Z
+            # f.write(struct.pack("<i", data.shape[3]))  # Channels
 
             # Compute the bounding box of the data
             bbox = np.array([0, 0, 0, data.shape[2], data.shape[0], data.shape[1]], dtype=np.float32)
+            #bbox = np.array([0, 0, 0, data.shape[2], data.shape[1], data.shape[0]], dtype=np.float32)
+
             f.write(struct.pack("<6f", *bbox))
 
             # Write the binary data
@@ -207,7 +217,7 @@ class MitsubaRenderer:
             'integrator': {  # integrator for volumes. max_depth is -1 for maximal accuracy
                 'type': 'volpath',  # 'prbvolpath','volpath'
                 'max_depth': -1,
-                'rr_depth': 10000},
+                'rr_depth': 1000},
             # --- [NEW BLOCK] ---
             # This object represents the low-density "air"
             # that fills the entire scene.
@@ -216,7 +226,7 @@ class MitsubaRenderer:
                 'bsdf': {'type': 'null'},  # Invisible container
                 # This transform creates a massive 1000km-wide cube
                 # centered at the world origin, filling the whole scene.
-                'to_world': mi.scalar_rgb.Transform4f.scale(500),
+                'to_world': mi.scalar_rgb.Transform4f.scale(1000),
                 'interior': {
                     'type': 'homogeneous',
                     'albedo': {
@@ -240,7 +250,8 @@ class MitsubaRenderer:
                 'type': 'cube',
                 'bsdf': {'type': 'null'},
                 'to_world': mi.scalar_rgb.Transform4f.scale(self.W / 2 * 1e3 / self.scene_scale).translate(
-                    [0, 0, 2 * self.cloud_zcenter]).rotate([1, 0, 0], 0),
+                     [0, 0, 2 * self.cloud_zcenter]),
+                #'to_world': mi.scalar_rgb.Transform4f.scale(self.W / 2 * 1e3 / self.scene_scale).rotate([1, 0, 0], 0),
                 'interior': {
                     'type': 'heterogeneous',
                     'albedo': 1.0,
@@ -252,6 +263,7 @@ class MitsubaRenderer:
                         'type': 'gridvolume',
                         'filename': self.vol_path,
                         'to_world': mi.scalar_rgb.Transform4f.rotate([0, 1, 0], -90).scale(
+                        #'to_world': mi.scalar_rgb.Transform4f.scale(
                             self.W * 1e3 / self.scene_scale).translate(
                             [-0.5 + self.cloud_zcenter, -0.5, -0.5]),
                     },
@@ -268,18 +280,18 @@ class MitsubaRenderer:
                 }
             },
 
-            'ocean': {  # trying to emulate the ocean
-                'type': 'cube',
-                'to_world': mi.scalar_rgb.Transform4f.scale((self.W / 2 + 4) * 1e3 / self.scene_scale).translate(
-                    [0, 0, -(self.W / 2 + 4) * 1e3 / self.scene_scale]),
-                'bsdf': {  # Smooth diffuse BSDF
-                    'type': 'diffuse',
-                    'reflectance': {
-                        'type': 'rgb',
-                        'value': 0.03
-                    }
-                }
-            }
+            # 'ocean': {  # trying to emulate the ocean
+            #     'type': 'cube',
+            #     'to_world': mi.scalar_rgb.Transform4f.scale((self.W / 2 + 4) * 1e3 / self.scene_scale).translate(
+            #         [0, 0, -(self.W / 2 + 4) * 1e3 / self.scene_scale]),
+            #     'bsdf': {  # Smooth diffuse BSDF
+            #         'type': 'diffuse',
+            #         'reflectance': {
+            #             'type': 'rgb',
+            #             'value': 0.03
+            #         }
+            #     }
+            # }
         }
         return scene_dict
 
