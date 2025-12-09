@@ -1,23 +1,29 @@
 import os
 import pickle
 import numpy as np
+import glob
 from netCDF4 import Dataset
+# Assuming this module exists in your environment
 from mitsuba3.calc_beta import process_cloud_vars
 
 
-def generate_velocity_beta_dataset_overlapping(nc_path, output_dir):
+def generate_patches_from_nc(nc_path, output_dir):
     """
-    Splits a 512x512x200 NetCDF file into patches of size 128x128x200 with overlap.
-    Stride is set to 64, meaning 50% overlap.
+    Process a single NetCDF file: splits it into 128x128 patches with overlap
+    and saves them as .pkl files in the specific output_dir.
     """
-    # 1. Create output folder
+    # 1. Create output folder for this specific file
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         print(f"Created directory: {output_dir}")
 
     # 2. Open NetCDF
-    print(f"Opening file: {nc_path}")
-    nc = Dataset(nc_path, 'r')
+    print(f"Processing file: {os.path.basename(nc_path)}")
+    try:
+        nc = Dataset(nc_path, 'r')
+    except Exception as e:
+        print(f"Error opening {nc_path}: {e}")
+        return
 
     # 3. Get Dimensions
     x_len = nc.variables['x'].shape[0]  # 512
@@ -27,19 +33,8 @@ def generate_velocity_beta_dataset_overlapping(nc_path, output_dir):
     patch_size = 128
     stride = 64  # This gives 50% overlap
 
-    # Calculate how many steps fit in each dimension
-    # For 512 size, 128 patch, 64 stride:
-    # Starts at: 0, 64, 128, 192, 256, 320, 384.
-    # Last start index must ensure we don't go over bounds (384 + 128 = 512)
     x_steps = (x_len - patch_size) // stride + 1
     y_steps = (y_len - patch_size) // stride + 1
-
-    print(f"--- Splitting Configuration ---")
-    print(f"Input Grid: {x_len}x{y_len}")
-    print(f"Patch Size: {patch_size}x{patch_size}")
-    print(f"Stride: {stride} (Overlap: {patch_size - stride} pixels)")
-    print(f"Total Patches: {x_steps}x{y_steps} = {x_steps * y_steps}")
-    print("-------------------------------")
 
     # Load Global Pressure (p) - needed for the calculation
     global_p = nc.variables['p'][:]
@@ -58,46 +53,92 @@ def generate_velocity_beta_dataset_overlapping(nc_path, output_dir):
             x_end = x_start + patch_size
 
             # Extract Variables (taking time index 0)
-            patch_QN = nc.variables['QN'][0, :, y_start:y_end, x_start:x_end]
-            patch_NC = nc.variables['NC'][0, :, y_start:y_end, x_start:x_end]
-            patch_TABS = nc.variables['TABS'][0, :, y_start:y_end, x_start:x_end]
+            # Using try/except in case of corrupt data segments
+            try:
+                patch_QN = nc.variables['QN'][0, :, y_start:y_end, x_start:x_end]
+                patch_NC = nc.variables['NC'][0, :, y_start:y_end, x_start:x_end]
+                patch_TABS = nc.variables['TABS'][0, :, y_start:y_end, x_start:x_end]
 
-            # --- Execute Calculation ---
-            _, _, patch_beta = process_cloud_vars(patch_QN, patch_NC, patch_TABS, global_p)
+                # --- Execute Calculation ---
+                _, _, patch_beta = process_cloud_vars(patch_QN, patch_NC, patch_TABS, global_p)
 
-            # --- Extract Targets ---
-            patch_U = nc.variables['U'][0, :, y_start:y_end, x_start:x_end]
-            patch_V = nc.variables['V'][0, :, y_start:y_end, x_start:x_end]
-            patch_W = nc.variables['W'][0, :, y_start:y_end, x_start:x_end]
+                # --- Extract Targets ---
+                patch_U = nc.variables['U'][0, :, y_start:y_end, x_start:x_end]
+                patch_V = nc.variables['V'][0, :, y_start:y_end, x_start:x_end]
+                patch_W = nc.variables['W'][0, :, y_start:y_end, x_start:x_end]
 
-            # --- Save Data ---
-            data = {
-                'metadata': {
-                    'id': count,
-                    'grid_idx': (i, j),
-                    'coords_x': (x_start, x_end),
-                    'coords_y': (y_start, y_end)
-                },
-                'U': np.ma.filled(patch_U, 0.0).astype(np.float32),
-                'V': np.ma.filled(patch_V, 0.0).astype(np.float32),
-                'W': np.ma.filled(patch_W, 0.0).astype(np.float32),
-                'beta_ext': np.ma.filled(patch_beta, 0.0).astype(np.float32)
-            }
+                # --- Save Data ---
+                data = {
+                    'metadata': {
+                        'source_file': os.path.basename(nc_path),
+                        'id': count,
+                        'grid_idx': (i, j),
+                        'coords_x': (x_start, x_end),
+                        'coords_y': (y_start, y_end)
+                    },
+                    'U': np.ma.filled(patch_U, 0.0).astype(np.float32),
+                    'V': np.ma.filled(patch_V, 0.0).astype(np.float32),
+                    'W': np.ma.filled(patch_W, 0.0).astype(np.float32),
+                    'beta_ext': np.ma.filled(patch_beta, 0.0).astype(np.float32)
+                }
 
-            filename = f"sample_{count:03d}.pkl"
-            with open(os.path.join(output_dir, filename), "wb") as f:
-                pickle.dump(data, f)
+                filename = f"sample_{count:03d}.pkl"
+                with open(os.path.join(output_dir, filename), "wb") as f:
+                    pickle.dump(data, f)
 
-            count += 1
-            if count % 10 == 0:
-                print(f"Processed {count}/{x_steps * y_steps} patches...")
+                count += 1
+
+            except Exception as e:
+                print(f"Error processing patch {i},{j} in {os.path.basename(nc_path)}: {e}")
 
     nc.close()
-    print(f"Done. Generated {count} patches in total.")
+    print(f"Finished {os.path.basename(nc_path)}: Generated {count} patches.")
 
 
-# --- Run ---
-nc_file_path = '/wdata_visl/udigal/netCDF_20X20/BOMEX_512x512x200_20m_20m_1s_512_0000006040.nc'
-output_folder_path = '/wdata_visl/danino/dataset_128_overlap'
+def process_all_nc_files(input_folder, base_output_folder):
+    """
+    Finds all .nc files in input_folder, SORTS THEM NUMERICALLY, and processes them.
+    """
+    # Find all .nc files
+    nc_files = glob.glob(os.path.join(input_folder, "*.nc"))
 
-generate_velocity_beta_dataset_overlapping(nc_file_path, output_folder_path)
+    if not nc_files:
+        print(f"No .nc files found in {input_folder}")
+        return
+
+    # --- KEY UPDATE: SORT BY NUMBER ---
+    # This lambda function extracts the last part of the filename (the number)
+    # splits by '_' and converts it to an integer for correct numerical sorting.
+    try:
+        nc_files.sort(key=lambda f: int(os.path.splitext(os.path.basename(f))[0].split('_')[-1]))
+        print("Files sorted numerically.")
+    except Exception as e:
+        print(f"Warning: Could not sort numerically (filenames might not match format). Running default order. Error: {e}")
+
+    print(f"Found {len(nc_files)} NetCDF files. Starting process...")
+    print("-" * 50)
+
+    for nc_file in nc_files:
+        # 1. Get the filename without extension
+        # e.g., "BOMEX_512x512x200_20m_20m_1s_512_0000002144"
+        base_name = os.path.splitext(os.path.basename(nc_file))[0]
+
+        # 2. Split by '_' and take the last element
+        # e.g., "0000002144"
+        folder_name = base_name.split('_')[-1]
+
+        # Determine specific output path: base_output_folder / folder_name
+        specific_output_dir = os.path.join(base_output_folder, folder_name)
+
+        # Run the generator
+        generate_patches_from_nc(nc_file, specific_output_dir)
+        print("-" * 50)
+
+
+# --- Run Configuration ---
+if __name__ == "__main__":
+    # Update these paths to your directories
+    input_directory = '/wdata_visl/udigal/netCDF_20X20/'
+    output_directory = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)'
+
+    process_all_nc_files(input_directory, output_directory)
