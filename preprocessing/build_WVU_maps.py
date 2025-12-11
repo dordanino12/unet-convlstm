@@ -5,7 +5,7 @@ import pandas as pd
 import ast
 from build_W_map import CloudRayCaster
 import matplotlib.pyplot as plt
-
+from tqdm import tqdm
 
 def load_camera_csv(csv_path):
     """
@@ -35,8 +35,8 @@ def load_camera_csv(csv_path):
             # User Input Format: [-y, x, z] -> [raw[0], raw[1], raw[2]]
             # Target Format:     [x, y, z]
 
-            x_km = raw_coords[1]  # x is the second element
-            y_km = -raw_coords[0]  # y is the negative of the first element (-y)
+            x_km = -raw_coords[1]  # x is the second element
+            y_km = raw_coords[0]  # y is the negative of the first element (-y)
             z_km = raw_coords[2]  # z is the third element
 
             sat_enu_km = np.array([x_km, y_km, z_km])
@@ -56,7 +56,7 @@ def load_camera_csv(csv_path):
 if __name__ == "__main__":
 
     # PATHS
-    input_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split[beta,U,V,W]//'
+    input_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)//'
     output_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(U,V,W_vel_maps)/'
     # Updated CSV path as requested
     csv_file_path = '/home/danino/PycharmProjects/pythonProject/data/Dor_2satellites_overpass.csv'
@@ -70,13 +70,22 @@ if __name__ == "__main__":
     # 2. Get and Sort Input Folders
     # Filter only numeric folders
     all_items = os.listdir(input_root)
-    folders = sorted([d for d in all_items if os.path.isdir(os.path.join(input_root, d)) and d.isdigit()])
-
+        # Optimized folder search
+    folders = []
+    if os.path.exists(input_root):
+        with os.scandir(input_root) as entries:
+            for entry in tqdm(entries, desc="Finding Folders"):
+                if entry.is_dir() and entry.name.isdigit():
+                    folders.append(entry.name)
+        folders = sorted(folders)
+    else:
+        print(f"Error: Input root {input_root} does not exist.")
+    
+    #folders = sorted([d for d in tqdm(all_items, desc="Finding Folders") if os.path.isdir(os.path.join(input_root, d)) and d.isdigit()])
     print(f"Found {len(folders)} data folders. Starting batch processing...")
 
     # 3. Iterate Folders with Stride/Cycle Logic
-    for folder_idx, folder_name in enumerate(folders):
-
+    for folder_idx, folder_name in enumerate(tqdm(folders, desc="Processing")):
         # A. Determine which CSV time to use (Cyclic/Modulo)
         # If folder_idx is 0 -> index 0
         # If folder_idx is larger than available CSV times -> wrap around
@@ -111,15 +120,15 @@ if __name__ == "__main__":
                     u_map, v_map, w_map = caster.render_velocity_maps_first_hit(
                         cam_pos=cam_pos,
                         look_at=look_at,
-                        resolution=(128, 128)
+                        resolution=(256, 256)
                     )
 
                     # Save RAW data
-                    data_packet = {'u_map': u_map, 'u_map': v_map, 'u_map': w_map}
+                    data_packet = {'u_map': u_map, 'v_map': v_map, 'w_map': w_map}
 
                     # Construct filename: sample_000_view_0.pkl
                     base_name = os.path.splitext(pkl_file)[0]
-                    save_name = f"{base_name}_view_{view_idx}.pkl"
+                    save_name = f"{base_name}_time_{target_time}_view_{view_idx}.pkl"
                     save_path = os.path.join(current_output_dir, save_name)
 
                     with open(save_path, 'wb') as f_out:
