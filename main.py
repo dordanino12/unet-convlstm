@@ -1,370 +1,251 @@
 """
-Temporal UNet + ConvLSTM with optional Skip-LSTM for dual-satellite velocity estimation
-Improved training: weighted L1 + gradient loss to preserve fine details
-Mask usage optional
+Main Training Script
+--------------------
+Dual-Satellite Velocity Estimation
+Supports two architectures:
+1. Custom Temporal U-Net (ConvLSTM-based)
+2. Pre-trained ResNet18 U-Net (Frozen Encoder)
 """
 
 from __future__ import annotations
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
 
+# --- Local Imports ---
+# Ensure these files exist in the 'train' folder
+from train.unet import TemporalUNetDualView, NPZSequenceDataset
+from train.resnet18 import PretrainedTemporalUNet
 
 # -----------------------------------------------------
-# ConvLSTM building blocks
-# -----------------------------------------------------
-class ConvLSTMCell(nn.Module):
-    def __init__(self, input_dim, hidden_dim, kernel_size=3, bias=True):
-        super().__init__()
-        padding = kernel_size // 2
-        self.hidden_dim = hidden_dim
-        self.conv = nn.Conv2d(input_dim + hidden_dim, 4 * hidden_dim, kernel_size, padding=padding, bias=bias)
-
-    def forward(self, x, state=None):
-        B, C, H, W = x.shape
-        if state is None:
-            h = x.new_zeros(B, self.hidden_dim, H, W)
-            c = x.new_zeros(B, self.hidden_dim, H, W)
-        else:
-            h, c = state
-        gates = self.conv(torch.cat([x, h], dim=1))
-        i, f, g, o = torch.chunk(gates, 4, dim=1)
-        i = torch.sigmoid(i)
-        f = torch.sigmoid(f)
-        g = torch.tanh(g)
-        o = torch.sigmoid(o)
-        c_next = f * c + i * g
-        h_next = o * torch.tanh(c_next)
-        return h_next, (h_next, c_next)
-
-
-class ConvLSTM(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers=1, kernel_size=3):
-        super().__init__()
-        self.layers = nn.ModuleList()
-        for l in range(num_layers):
-            self.layers.append(ConvLSTMCell(input_dim if l == 0 else hidden_dim, hidden_dim, kernel_size))
-
-    def forward(self, x_seq, state=None):
-        T = len(x_seq)
-        if state is None:
-            state = [None] * len(self.layers)
-        out = x_seq
-        new_states = []
-        for li, layer in enumerate(self.layers):
-            h, c = (None, None) if state[li] is None else state[li]
-            seq_out = []
-            for t in range(T):
-                h, (h, c) = layer(out[t], None if h is None else (h, c))
-                seq_out.append(h)
-            out = seq_out
-            new_states.append((h, c))
-        return out, new_states
-
-
-# -----------------------------------------------------
-# UNet blocks
-# -----------------------------------------------------
-class DoubleConv(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True)
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
-class Down(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.net = nn.Sequential(nn.MaxPool2d(2), DoubleConv(in_ch, out_ch))
-
-    def forward(self, x):
-        return self.net(x)
-
-
-class Up(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.up = nn.ConvTranspose2d(in_ch, in_ch // 2, 2, stride=2)
-        self.conv = DoubleConv(in_ch, out_ch)
-
-    def forward(self, x1, x2):
-        x1 = self.up(x1)
-        diffY = x2.size(2) - x1.size(2)
-        diffX = x2.size(3) - x1.size(3)
-        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
-        return self.conv(torch.cat([x2, x1], dim=1))
-
-
-class OutConv(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.conv = nn.Conv2d(in_ch, out_ch, 1)
-
-    def forward(self, x):
-        return self.conv(x)
-
-
-# -----------------------------------------------------
-# Spatial Attention Module
-# -----------------------------------------------------
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super().__init__()
-        padding = kernel_size // 2
-        self.conv = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = x.mean(dim=1, keepdim=True)
-        max_out, _ = x.max(dim=1, keepdim=True)
-        x_cat = torch.cat([avg_out, max_out], dim=1)
-        attention = self.sigmoid(self.conv(x_cat))
-        return x * attention
-
-
-# -----------------------------------------------------
-# Temporal UNet Dual View with Attention
-# -----------------------------------------------------
-class TemporalUNetDualView(nn.Module):
-    def __init__(self, in_channels_per_sat=1, out_channels=1, base_ch=32, lstm_layers=1, use_skip_lstm=False):
-        super().__init__()
-        in_ch_total = in_channels_per_sat * 2
-        self.inc = DoubleConv(in_ch_total, base_ch)
-        self.down1 = Down(base_ch, base_ch * 2)
-        self.down2 = Down(base_ch * 2, base_ch * 4)
-        self.down3 = Down(base_ch * 4, base_ch * 8)
-        self.bottleneck = Down(base_ch * 8, base_ch * 16)
-
-        # Attention after bottleneck
-        self.attention = SpatialAttention()
-
-        # Temporal ConvLSTM
-        self.temporal = ConvLSTM(base_ch * 16, base_ch * 16, num_layers=lstm_layers)
-
-        self.use_skip_lstm = use_skip_lstm
-        if use_skip_lstm:
-            self.lstm_skip3 = ConvLSTM(base_ch * 8, base_ch * 8)
-            self.lstm_skip2 = ConvLSTM(base_ch * 4, base_ch * 4)
-
-        self.up3 = Up(base_ch * 16, base_ch * 8)
-        self.up2 = Up(base_ch * 8, base_ch * 4)
-        self.up1 = Up(base_ch * 4, base_ch * 2)
-        self.up0 = Up(base_ch * 2, base_ch)
-        self.outc = OutConv(base_ch, out_channels)
-
-    def encode_once(self, x_t):
-        x0 = self.inc(x_t)
-        x1 = self.down1(x0)
-        x2 = self.down2(x1)
-        x3 = self.down3(x2)
-        xb = self.bottleneck(x3)
-        xb = self.attention(xb)
-        return xb, (x3, x2, x1, x0)
-
-    def forward(self, x_seq, state=None):
-        B, T, C, H, W = x_seq.shape
-        bottlenecks = []
-        skips = []
-
-        for t in range(T):
-            xb, sk = self.encode_once(x_seq[:, t])
-            bottlenecks.append(xb)
-            skips.append(sk)
-
-        # Temporal ConvLSTM
-        bottleneck_out, new_state = self.temporal(bottlenecks, state)
-
-        if self.use_skip_lstm:
-            x3_seq = [s[0] for s in skips]
-            x2_seq = [s[1] for s in skips]
-            x3_lstm, _ = self.lstm_skip3(x3_seq)
-            x2_lstm, _ = self.lstm_skip2(x2_seq)
-            for t in range(T):
-                skips[t] = (x3_lstm[t], x2_lstm[t], skips[t][2], skips[t][3])
-
-        out_seq = []
-        for t in range(T):
-            x3, x2, x1, x0 = skips[t]
-            d3 = self.up3(bottleneck_out[t], x3)
-            d2 = self.up2(d3, x2)
-            d1 = self.up1(d2, x1)
-            d0 = self.up0(d1, x0)
-            out_seq.append(self.outc(d0))
-
-        return out_seq, new_state
-
-
-# -----------------------------------------------------
-# NPZ Dataset loader with velocity normalization [-1,1]
-# -----------------------------------------------------
-class NPZSequenceDataset(Dataset):
-    def __init__(self, npz_path, lower_percentile=0.1, upper_percentile=99.9, clip_outliers=True):
-        data = np.load(npz_path)
-        self.X = data["X"].astype(np.float32)
-        self.Y = data["Y"].astype(np.float32)
-        self.N, self.T, _, self.H, self.W = self.X.shape
-
-        self.min_vel = np.percentile(self.Y, lower_percentile)
-        self.max_vel = np.percentile(self.Y, upper_percentile)
-        self.clip_outliers = clip_outliers
-
-        print(f"[INFO] Velocity normalization range based on percentiles:")
-        print(f"       {lower_percentile}th percentile: {self.min_vel}")
-        print(f"       {upper_percentile}th percentile: {self.max_vel}")
-        print(f"       Outliers clipped: {clip_outliers}")
-
-    def __len__(self):
-        return self.N
-
-    def __getitem__(self, idx):
-        x = torch.from_numpy(self.X[idx])
-        y = torch.from_numpy(self.Y[idx])
-        if self.clip_outliers:
-            y = torch.clamp(y, self.min_vel, self.max_vel)
-        y = 2 * (y - self.min_vel) / (self.max_vel - self.min_vel) - 1
-        mask = ((x[:, 0:1] > 0.12) | (x[:, 0:1] < -0.12) | (x[:, 1:2] > 0.12) | (x[:, 1:2] < -0.12)).float() # apply mask
-        return x, y, mask
-
-
-# -----------------------------------------------------
-# Improved loss: weighted L1 + gradient loss
+# Loss Function: Weighted L1 + Gradient Loss
 # -----------------------------------------------------
 def compute_loss(y_pred, y, mask=None, use_mask=True):
     """
-    Weighted L1 loss + gradient loss with optional mask.
-    y_pred, y: [B, T, 1, H, W]
-    mask: same shape
+    Computes weighted L1 loss and spatial gradient loss.
+    - Penalizes high-velocity errors more heavily.
+    - Ensures numerical stability with epsilon.
     """
-    # -----------------------------
-    # Weighted L1
-    # -----------------------------
+    # 1. Weighted L1
     abs_diff = (y_pred - y).abs()
-    weight = 1.0 + 2.5 * (y.abs() > 0.8).float()  # high-velocity weighting
+    
+    # Weight: Give 6x importance to pixels with significant movement (> 0.5)
+    weight = 1.0 + 5.0 * (y.abs() > 0.5).float() 
 
     if use_mask and mask is not None:
-        weighted_l1 = (abs_diff * mask * weight).sum() / (mask * weight).sum()
+        numerator = (abs_diff * mask * weight).sum()
+        denominator = (mask * weight).sum() + 1e-8
+        weighted_l1 = numerator / denominator
     else:
         weighted_l1 = (abs_diff * weight).mean()
 
-    # -----------------------------
-    # Gradient loss
-    # -----------------------------
+    # 2. Gradient Loss (Spatial smoothness and edge preservation)
     def spatial_gradients(tensor):
-        dx = tensor[..., :, 1:] - tensor[..., :, :-1]  # width gradient
-        dy = tensor[..., 1:, :] - tensor[..., :-1, :]  # height gradient
+        dx = tensor[..., :, 1:] - tensor[..., :, :-1]
+        dy = tensor[..., 1:, :] - tensor[..., :-1, :]
         return dx, dy
 
     dx_pred, dy_pred = spatial_gradients(y_pred)
     dx_gt, dy_gt = spatial_gradients(y)
 
-    # Crop to smallest spatial size to avoid shape mismatch
-    H_min = min(dx_pred.shape[3], dy_pred.shape[3], dx_gt.shape[3], dy_gt.shape[3])
-    W_min = min(dx_pred.shape[4], dy_pred.shape[4], dx_gt.shape[4], dy_gt.shape[4])
+    # Crop to smallest spatial dim to avoid shape mismatch
+    H_min = min(dx_pred.shape[3], dy_pred.shape[3])
+    W_min = min(dx_pred.shape[4], dy_pred.shape[4])
 
-    dx_pred_c = dx_pred[..., :H_min, :W_min]
-    dy_pred_c = dy_pred[..., :H_min, :W_min]
-    dx_gt_c = dx_gt[..., :H_min, :W_min]
-    dy_gt_c = dy_gt[..., :H_min, :W_min]
+    # Calculate gradient differences
+    grad_diff = (dx_pred[..., :H_min, :W_min] - dx_gt[..., :H_min, :W_min]).abs() + \
+                (dy_pred[..., :H_min, :W_min] - dy_gt[..., :H_min, :W_min]).abs()
 
     if use_mask and mask is not None:
         mask_c = mask[..., :H_min, :W_min]
-        grad_loss = ((dx_pred_c - dx_gt_c).abs() + (dy_pred_c - dy_gt_c).abs()).sum() / (mask_c.sum() + 1e-8)
+        grad_loss = (grad_diff * mask_c).sum() / (mask_c.sum() + 1e-8)
     else:
-        grad_loss = ((dx_pred_c - dx_gt_c).abs() + (dy_pred_c - dy_gt_c).abs()).mean()
+        grad_loss = grad_diff.mean()
 
-    total_loss = weighted_l1 + 0.05 * grad_loss
+    # Combine losses (0.01 weight for gradients is usually sufficient)
+    total_loss = weighted_l1 + 0.01 * grad_loss
     return total_loss
 
 
 # -----------------------------------------------------
-# Training & evaluation
+# Training Loop
 # -----------------------------------------------------
 def train_one_epoch(model, loader, optimizer, device, use_mask=True):
     model.train()
     total_loss, n = 0.0, 0
+    
     for x, y, mask in tqdm(loader, desc="Training", leave=False):
         x, y, mask = x.to(device), y.to(device), mask.to(device)
-        y_pred_seq, _ = model(x)
-        y_pred = torch.stack(y_pred_seq, dim=1)
-        loss = compute_loss(y_pred, y, mask, use_mask)
+        
         optimizer.zero_grad(set_to_none=True)
+        
+        # Forward pass
+        output, _ = model(x)
+        
+        # Compatibility handling:
+        # Custom model returns a LIST of tensors (needs stacking).
+        # Pretrained model returns a stacked TENSOR.
+        if isinstance(output, list):
+            y_pred = torch.stack(output, dim=1)
+        else:
+            y_pred = output
+            
+        loss = compute_loss(y_pred, y, mask, use_mask)
         loss.backward()
+        
+        # Gradient clipping to prevent explosion in LSTM
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        
         optimizer.step()
+        
         total_loss += loss.item() * x.size(0)
         n += x.size(0)
+        
     return total_loss / n
 
 
+# -----------------------------------------------------
+# Evaluation Loop
+# -----------------------------------------------------
 @torch.no_grad()
 def evaluate(model, loader, device, use_mask=True):
     model.eval()
     total_loss, n = 0.0, 0
+    
     for x, y, mask in loader:
         x, y, mask = x.to(device), y.to(device), mask.to(device)
-        y_pred_seq, _ = model(x)
-        y_pred = torch.stack(y_pred_seq, dim=1)
+        
+        output, _ = model(x)
+        
+        # Compatibility handling
+        if isinstance(output, list):
+            y_pred = torch.stack(output, dim=1)
+        else:
+            y_pred = output
+            
         loss = compute_loss(y_pred, y, mask, use_mask)
         total_loss += loss.item() * x.size(0)
         n += x.size(0)
+        
     return total_loss / n
 
 
 # -----------------------------------------------------
-# Main
+# Main Execution
 # -----------------------------------------------------
 if __name__ == "__main__":
-    npz_path = "data/dataset_sequences_slice_0.npz"
-    batch_size = 16
+    # --- 1. Global Configuration ---
+    
+    # Toggle this to switch architectures
+    USE_PRETRAINED = True  # Set False for Custom Model, True for ResNet
+    
+    # Common hyperparameters
+    BATCH_SIZE = 8
+    EPOCHS = 50
+    LR = 1e-3
+    WEIGHT_DECAY = 1e-4
+    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples.npz"
+    
+    # Custom Model specific config
+    CUSTOM_CFG = {
+        'base_ch': 64,
+        'use_attention': False,
+        'use_skip_lstm': True
+    }
+
+    # Setup Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(device)
+    print(f"Running on: {device}")
+    
+    # --- 2. Data Loading ---
+    if not os.path.exists(NPZ_PATH):
+        print(f"ERROR: Dataset not found at {NPZ_PATH}")
+        exit(1)
 
-    dataset = NPZSequenceDataset(npz_path)
-    print("Dataset length:", len(dataset))
-    x, y, mask = dataset[0]
-    print("x.shape:", x.shape)
-    print("y.shape:", y.shape)
-    print("mask.shape:", mask.shape)
-
+    dataset = NPZSequenceDataset(NPZ_PATH)
+    print(f"Dataset length: {len(dataset)}")
+    
+    # Split Train/Val (80/20)
     n_train = int(0.8 * len(dataset))
     train_ds, val_ds = torch.utils.data.random_split(dataset, [n_train, len(dataset) - n_train])
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=True)
+    
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, pin_memory=True)
 
-    USE_SKIP_LSTM = True
-    USE_MASK = True  # <-- control whether mask is used in loss
+    # --- 3. Model Initialization ---
+    if USE_PRETRAINED:
+        print("[INFO] Initializing Pre-trained ResNet18 Model...")
+        model = PretrainedTemporalUNet(
+            out_channels=1,
+            lstm_layers=1,
+            freeze_encoder=True  # Important: Freeze weights for small datasets
+        ).to(device)
+        
+        # For frozen models, optimize only parameters that require gradients
+        optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()), 
+            lr=LR, 
+            weight_decay=WEIGHT_DECAY
+        )
+        model_name = "resnet18_frozen"
+        
+    else:
+        print("[INFO] Initializing Custom Temporal U-Net...")
+        model = TemporalUNetDualView(
+            in_channels_per_sat=1,
+            out_channels=1,
+            base_ch=CUSTOM_CFG['base_ch'],
+            lstm_layers=1,
+            use_skip_lstm=CUSTOM_CFG['use_skip_lstm'],
+            use_attention=CUSTOM_CFG['use_attention']
+        ).to(device)
+        
+        optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+        model_name = "custom_unet_64ch"
 
-    model = TemporalUNetDualView(
-        in_channels_per_sat=1,
-        out_channels=1,
-        base_ch=32,
-        lstm_layers=1,
-        use_skip_lstm=USE_SKIP_LSTM
-    ).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
+    # Learning Rate Scheduler (Recommended)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=3, verbose=True
+    )
 
+    # --- 4. Training Loop ---
     best_val_loss = float('inf')
-    EPOCHS = 10 # You'll likely need more than 10
+    save_dir = "models"
+    os.makedirs(save_dir, exist_ok=True)
+    
+    print(f"Starting training for {EPOCHS} epochs...")
 
     for epoch in range(1, EPOCHS + 1):
-        tr = train_one_epoch(model, train_loader, optimizer, device, use_mask=USE_MASK)
-        val = evaluate(model, val_loader, device, use_mask=USE_MASK)
-        print(f"Epoch {epoch}: train={tr:.6f} | val={val:.6f}")
+        tr_loss = train_one_epoch(model, train_loader, optimizer, device, use_mask=True)
+        val_loss = evaluate(model, val_loader, device, use_mask=True)
+        
+        # Update scheduler
+        scheduler.step(val_loss)
+        
+        print(f"Epoch {epoch}/{EPOCHS}: Train={tr_loss:.6f} | Val={val_loss:.6f}")
 
-        if val < best_val_loss:
-            best_val_loss = val
-            print(f"  -> New best model saved with val_loss: {val:.6f}")
+        # Save Best Model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            print(f"  -> New best model! Saving...")
+            
+            save_path = os.path.join(save_dir, f"{model_name}_best.pt")
+            
+            # Prepare config dictionary based on model type
+            if USE_PRETRAINED:
+                saved_cfg = {'type': 'resnet18', 'freeze_encoder': True}
+            else:
+                saved_cfg = {'type': 'custom', **CUSTOM_CFG}
+
             torch.save({
                 'model_state': model.state_dict(),
-                'cfg': {'in_channels_per_sat': 1, 'out_channels': 1, 'use_skip_lstm': USE_SKIP_LSTM}
-            }, 'models/temporal_unet_convlstm_dualview_from_npz_slice0_att_score_.pt')
+                'config': saved_cfg,
+                'val_loss': best_val_loss,
+                'epoch': epoch
+            }, save_path)
 
-    print("Training complete. Best val loss:", best_val_loss)
+    print(f"Training complete. Best Validation Loss: {best_val_loss:.6f}")
