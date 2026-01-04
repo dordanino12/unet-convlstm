@@ -30,7 +30,7 @@ def generate_patches_from_nc(nc_path, output_dir):
     y_len = nc.variables['y'].shape[0]  # 512
 
     # --- Configuration for 128x128 patches with overlap ---
-    patch_size = 128
+    patch_size = 512
     stride = 64  # This gives 50% overlap
 
     x_steps = (x_len - patch_size) // stride + 1
@@ -139,6 +139,6 @@ def process_all_nc_files(input_folder, base_output_folder):
 if __name__ == "__main__":
     # Update these paths to your directories
     input_directory = '/wdata_visl/udigal/netCDF_20X20/'
-    output_directory = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)'
+    output_directory = '/wdata_visl/danino/dataset_512x512x200_overlap_64_stride_7x7_split(beta,U,V,W)'
 
     process_all_nc_files(input_directory, output_directory)

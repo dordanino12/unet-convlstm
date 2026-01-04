@@ -101,11 +101,11 @@ if __name__ == "__main__":
     # --- PATHS ---
     
     # 1. The Velocity File
-    vel_file = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(U,V,W_vel_maps)/0000002000/sample_004_time_0_view_0.pkl"
+    vel_file = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(vel_maps_slice_500m)/0000002000/sample_047_time_0_view_1_slice_500m.pkl"
     
     # 2. The Render File 
     # (Update this path to point to a real file you created in the previous step)
-    render_file = "/wdata_visl/danino/dataset_rendered_data/0000002000/sample_004_time_0_view_0.pkl"
+    render_file = "/wdata_visl/danino/dataset_rendered_data/0000002000/sample_047_time_0_view_1.pkl"
     
     # 3. Output Prefix
     output_png_prefix = '/home/danino/PycharmProjects/pythonProject/data/output/check_combined.png'

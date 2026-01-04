@@ -11,7 +11,7 @@ matplotlib.use('Agg')
 # ---------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------
-NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples.npz"
+NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top.npz"
 OUTPUT_DIR = "/home/danino/PycharmProjects/pythonProject/plots/mask_tuning/"
 NUM_VIDEOS_TO_GENERATE = 1
 FPS = 1

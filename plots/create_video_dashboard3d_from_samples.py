@@ -230,14 +230,29 @@ def create_dashboard_3d_padded(
                     w1 = pickle.load(f)['w_map']
 
             # --- Process Images ---
-            def norm_gray(img):
+            def norm_gray_with_gamma(img, gamma=0.5):
+                # 1. Handle NaNs
                 img = np.nan_to_num(img, nan=0.0)
-                mi, ma = np.min(img), np.max(img)
-                norm = ((img - mi)/(ma - mi)*255).astype(np.uint8) if ma>mi else np.zeros_like(img, dtype=np.uint8)
-                return cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)
 
-            render0 = norm_gray(img0)
-            render1 = norm_gray(img1)
+                # 2. Linear Normalization (0.0 to 1.0 float)
+                mi, ma = np.min(img), np.max(img)
+                if ma > mi:
+                    norm_float = (img - mi) / (ma - mi)
+                else:
+                    norm_float = np.zeros_like(img)
+
+                # 3. Apply Gamma Correction
+                # Gamma < 1.0 will make the image lighter (expands shadows)
+                # Gamma > 1.0 will make the image darker
+                gamma_corrected = np.power(norm_float, gamma)
+
+                # 4. Convert to 0-255 uint8
+                norm_uint8 = (gamma_corrected * 255).astype(np.uint8)
+
+                return cv2.cvtColor(norm_uint8, cv2.COLOR_GRAY2BGR)
+
+            render0 = norm_gray_with_gamma(img0)
+            render1 = norm_gray_with_gamma(img1)
             w0_col = apply_jet_colormap(w0)
             w1_col = apply_jet_colormap(w1)
 
@@ -325,7 +340,7 @@ if __name__ == "__main__":
         csv_file,
         output_video,
         sample_id=target_sample,
-        start_folder=2000, 
-        end_folder=19740,
+        start_folder=8000,
+        end_folder=8300,
         fps=2
     )

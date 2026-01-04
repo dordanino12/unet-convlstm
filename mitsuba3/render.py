@@ -21,7 +21,7 @@ else:
 
 
 class MitsubaRenderer:
-    def __init__(self, overpass_csv, overpass_indices, spp, g_value=0, cloud_width=128, image_res=256, voxel_res=0.02, scene_scale=1e3,
+    def __init__(self, overpass_csv, overpass_indices, spp, g_value=0, cloud_width=128, image_res=256, fov=0.25, voxel_res=0.02, scene_scale=1e3,
                  cloud_zrange=[0, 4],
                  satellites=3, timestamps=2, pad_image=True, dynamic_emitter=True, centralize_cloud=True,
                  bitmaps_required=True,
@@ -54,7 +54,7 @@ class MitsubaRenderer:
         self.cloud_zcenter = sum(cloud_zrange) / 2
 
         self.sensors = []
-        self.fov = None
+        self.fov = fov
         self.film_dim = image_res
 
         self.scenes_dict = []
@@ -91,17 +91,17 @@ class MitsubaRenderer:
         H_0 = self.sat_H[nadir_idx]
         Dz = np.tan(theta_z * (np.pi / 180)) * H_z
 
-        if self.pad_image:
-            self.fov = 2 * (-theta_z + np.arctan((Dz + self.W / 2) / (H_z - self.cloud_zrange[1])) * (180 / np.pi))
-            #self.film_dim = int(
-            #    np.ceil(2 * (H_z - self.cloud_zrange[1]) * np.tan(self.fov / 2 * np.pi / 180) / self.voxel_res))
-        else:
-            self.fov = 2 * np.arctan((self.W / 2) / (H_0 - self.cloud_zrange[1])) * (180 / np.pi) # this in degree unit
-            #self.film_dim = self.cloud_width
+        # if self.pad_image:
+        #     self.fov = 2 * (-theta_z + np.arctan((Dz + self.W / 2) / (H_z - self.cloud_zrange[1])) * (180 / np.pi))
+        #     #self.film_dim = int(
+        #     #    np.ceil(2 * (H_z - self.cloud_zrange[1]) * np.tan(self.fov / 2 * np.pi / 180) / self.voxel_res))
+        # else:
+        #     self.fov = 2 * np.arctan((self.W / 2) / (H_0 - self.cloud_zrange[1])) * (180 / np.pi) # this in degree unit
+        #     #self.film_dim = self.cloud_width
 
     def create_sensors(self):
         # Calculate the cloud's center Z coordinate once
-        cloud_target_z = self.cloud_zcenter * 2.5
+        cloud_target_z = self.cloud_zcenter * 2.5 # 4.22 for 256 , 2.5 for 128 or maybe try 2.2 , for 512 on 512 8.44+-
 
         for i in range(len(self.overpass_indices)):
             # --- THIS IS THE FIX ---
@@ -141,7 +141,7 @@ class MitsubaRenderer:
             if sample_ext is None:
                 sample_path = sample_path
             else:
-                sample_path = sample_path + '.' + sample_ext
+                sample_path = sample_path # + '.' + sample_ext
             with open(sample_path, "rb") as f:
                 sample = pickle.load(f)
             data = np.transpose(sample[param_type], (2, 1, 0)) # smaple is [Z,Y,X]
@@ -280,18 +280,18 @@ class MitsubaRenderer:
                 }
             },
 
-            # 'ocean': {  # trying to emulate the ocean
-            #     'type': 'cube',
-            #     'to_world': mi.scalar_rgb.Transform4f.scale((self.W / 2 + 4) * 1e3 / self.scene_scale).translate(
-            #         [0, 0, -(self.W / 2 + 4) * 1e3 / self.scene_scale]),
-            #     'bsdf': {  # Smooth diffuse BSDF
-            #         'type': 'diffuse',
-            #         'reflectance': {
-            #             'type': 'rgb',
-            #             'value': 0.03
-            #         }
-            #     }
-            # }
+            'ocean': {  # trying to emulate the ocean
+                'type': 'cube',
+                'to_world': mi.scalar_rgb.Transform4f.scale((self.W / 2 + 4) * 1e3 / self.scene_scale).translate(
+                    [0, 0, -(self.W / 2 + 4) * 1e3 / self.scene_scale]),
+                'bsdf': {  # Smooth diffuse BSDF
+                    'type': 'diffuse',
+                    'reflectance': {
+                        'type': 'rgb',
+                        'value': 0.03
+                    }
+                }
+            }
         }
         return scene_dict
 

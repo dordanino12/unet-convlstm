@@ -68,5 +68,5 @@ def inspect_and_visualize(folder_path, specific_file):
 
 
 # --- Run ---
-dataset_folder = '/wdata_visl/danino/dataset_128_overlap/'
-inspect_and_visualize(dataset_folder, "sample_006.pkl")
+dataset_folder = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000009000/'
+inspect_and_visualize(dataset_folder, "sample_000.pkl")

@@ -2,8 +2,9 @@
 from render import MitsubaRenderer
 import numpy as np
 from PIL import Image
-import os  # <-- Added import
-import mitsuba as mi  # <-- Added import
+import os
+import mitsuba as mi
+import pickle
 
 # --- Imports for 3D Plotting ---
 import matplotlib.pyplot as plt
@@ -12,38 +13,50 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 # --- 1. Define Your Input Data Paths ---
 # You must have these files.
-csv_file = '/home/danino/PycharmProjects/pythonProject/data/Udi_3satellites_overpass.csv'
+csv_file = '/home/danino/PycharmProjects/pythonProject/data/Dor_2satellites_overpass.csv'
+csv_file = '/home/danino/PycharmProjects/pythonProject/data/debug.csv'
 
-cloud_data_file = '/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_3D/BOMEX_512x512x200_20m_20m_1s_512_0000005300_5_2'  # This is the pkl file you have
+#cloud_data_file = '/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_3D/BOMEX_512x512x200_20m_20m_1s_512_0000005200_1_5'  # This is the pkl file you have
+#cloud_data_file= "/wdata_visl/danino/dataset_256x256x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000002000/sample_001.pkl"
+cloud_data_file= "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000007000/sample_019.pkl"
+#cloud_data_file= "/wdata_visl/danino/dataset_512x512x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000002000/sample_000.pkl"
+
 output_vol_file = 'temp/my_cloud.vol'  # A temporary file this script will create
-
+output_image_dir = '/home/danino/PycharmProjects/pythonProject/data/output'
 # Create temp directory if it doesn't exist
 os.makedirs('temp', exist_ok=True)
 
 # Define which rows from your CSV to use
-overpass_indices = [0, 1, 2, 9, 12, 15]
-#overpass_indices = [0, 3, 6, 9, 12, 15]
-#overpass_indices = [6, 7, 8, 9, 10, 11]
-#overpass_indices = [9, 10, 11, 15, 16, 17]
-#overpass_indices = [0, 1, 2, 30, 31, 32]
-#overpass_indices = [12,13,14, 15, 16, 17]
-#overpass_indices = [7, 8,9]
-#overpass_indices = [0, 1, 2]
+overpass_indices = [0, 1, 3, 5, 7, 9]
+overpass_indices = [11, 13, 15, 17, 19, 21]
+overpass_indices = [0, 1, 9, 17, 19, 21]
+overpass_indices = [0,1,2,3]
+
+
+# overpass_indices = [0, 3, 6, 9, 12, 15]
+# overpass_indices = [6, 7, 8, 9, 10, 11]
+# overpass_indices = [9, 10, 11, 15, 16, 17]
+# overpass_indices = [0, 1, 2, 30, 31, 32]
+# overpass_indices = [12,13,14, 15, 16, 17]
+# overpass_indices = [7, 8,9]
+# overpass_indices = [0, 1, 2]
 
 
 # --- 2. Set Up the Renderer Parameters ---
 renderer_params = {
     'overpass_csv': csv_file,
     'overpass_indices': overpass_indices,
-    'spp': 512,
-    'g_value': 0.7,
+    'spp': 256,
+    'g_value': 0.0,
     'cloud_width': 128,
+    'image_res': 256,
+    'fov' : 0.25,
     'voxel_res': 0.02,
     'scene_scale': 1000.0,
     'cloud_zrange': [0.0, 4.0],
-    'satellites': 3,
+    'satellites': 2,
     'timestamps': 2,
-    'pad_image': True,
+    'pad_image': False,
     'dynamic_emitter': True,
     'centralize_cloud': True,
     'bitmaps_required': False,
@@ -86,6 +99,36 @@ else:
     n_timestamps = renderer.timestamps
     n_satellites = renderer.satellites
 
+    GAMMA_VAL = 0.5
+
+    # Loop through all results
+    for t in range(n_timestamps):
+        for s in range(n_satellites):
+            # Get the raw image data
+            float_data = tensor_stacks[t][s]
+
+            # 1. Normalize to 0-1
+            if float_data.max() > 0:
+                normalized_data = float_data / float_data.max()
+            else:
+                normalized_data = float_data
+
+            # 2. [NEW] Apply Gamma Correction
+            # We raise the normalized data to the power of the gamma value
+            corrected_data = np.power(normalized_data, GAMMA_VAL)
+
+            # 3. Convert to 0-255 Integer
+            image_data_uint8 = (corrected_data * 255).astype(np.uint8)
+
+            # Create a filename: render_t{timestamp}_s{satellite}.png
+            filename = f"render_t{t:02d}_s{s:02d}.png"
+            filepath = os.path.join(output_image_dir, filename)
+
+            # Save using PIL
+            img = Image.fromarray(image_data_uint8)
+            img.save(filepath)
+            print(f"Saved: {filepath}")
+
     # Handle the case where n_satellites is 1, so subplots isn't 2D
     if n_timestamps == 1 and n_satellites == 1:
         fig, axes = plt.subplots(1, 1, figsize=(n_satellites * 4, n_timestamps * 4))
@@ -120,8 +163,35 @@ else:
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     print("Displaying 2D render plot...")
-    #plt.show()  # Show the 2D plot window
+    # plt.show()  # Show the 2D plot window
 
+# ==============================================================================
+# 8.5 NEW SECTION: LOAD AND SHOW TARGET IMAGE
+# ==============================================================================
+print(f"Loading 'target' image directly from {cloud_data_file}...")
+try:
+    cloud_data_file = cloud_data_file + '.pkl'
+    with open(cloud_data_file, 'rb') as f:
+        data_dict = pickle.load(f)
+
+    if 'target' in data_dict:
+        target_img = np.ma.getdata(data_dict['target'])
+
+        # Ensure dimensions are correct (remove singleton dims like 1x128x128 -> 128x128)
+        #target_img = np.squeeze(target_img)
+
+        plt.figure(figsize=(6, 6))
+        plt.imshow(target_img, cmap='gray')
+        plt.title(f"Target Image (Ground Truth)\nShape: {target_img.shape}")
+        plt.axis('off')
+        print("Target image loaded and ready to display.")
+    else:
+        print(f"Warning: 'target' key not found in the .pkl file. Available keys: {list(data_dict.keys())}")
+
+except Exception as e:
+    print(f"Error loading target image: {e}")
+
+# ==============================================================================
 first_tensor_data = tensor_stacks[0][0]
 print(f"Shape of the first tensor: {first_tensor_data.shape}")
 

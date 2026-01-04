@@ -208,7 +208,7 @@ class TemporalUNetDualView(nn.Module):
 # NPZ Dataset loader with velocity normalization [-1,1]
 # -----------------------------------------------------
 class NPZSequenceDataset(Dataset):
-    def __init__(self, npz_path, lower_percentile=0.1, upper_percentile=99.9, clip_outliers=True):
+    def __init__(self, npz_path, lower_percentile=0.1, upper_percentile=99.9, clip_outliers=True, min_y=-7.5987958908081055, max_y= 8.784920692443848, y_transform='asinh', y_transform_scale=None, y_transform_percentile=99):
         data = np.load(npz_path)
         self.X = data["X"].astype(np.float32)
         self.Y = data["Y"].astype(np.float32)
@@ -219,12 +219,53 @@ class NPZSequenceDataset(Dataset):
         # Optional: Add a small buffer or round up to keep scaling fixed even if dataset changes slightly
         self.norm_const = max(self.x_max, 1.0) 
 
-        self.min_vel = np.percentile(self.Y, lower_percentile)
-        self.max_vel = np.percentile(self.Y, upper_percentile)
+        # Use explicit min/max if provided, otherwise fall back to percentiles (in raw space)
+        if (min_y is not None) and (max_y is not None):
+            self.min_vel = float(min_y)
+            self.max_vel = float(max_y)
+            used = "explicit"
+        else:
+            self.min_vel = np.percentile(self.Y, lower_percentile)
+            self.max_vel = np.percentile(self.Y, upper_percentile)
+            used = "percentile"
+
         self.clip_outliers = clip_outliers
 
+        # Non-linear transform settings
+        self.y_transform = y_transform
+        # default scale is the percentile (e.g., 99th) of absolute values if not provided
+        if y_transform_scale is None:
+            self.y_scale = float(np.percentile(np.abs(self.Y), y_transform_percentile)) if y_transform_percentile is not None else 1.0
+        else:
+            self.y_scale = float(y_transform_scale)
+
+        # Prepare transformed Y for computing transformed min/max used for mapping to [-1,1]
+        def _transform_array(arr):
+            if self.y_transform == 'asinh':
+                return np.arcsinh(arr / self.y_scale)
+            if self.y_transform == 'signed_log':
+                return np.sign(arr) * np.log1p(np.abs(arr) / self.y_scale)
+            return arr
+
+        Y_trans = _transform_array(self.Y)
+
+        # Transformed min/max correspond to transformed versions of raw min/max (if explicit)
+        if used == "explicit":
+            self.trans_min = _transform_array(self.min_vel)
+            self.trans_max = _transform_array(self.max_vel)
+            trans_used = "from_explicit_raw"
+        else:
+            self.trans_min = np.percentile(Y_trans, lower_percentile)
+            self.trans_max = np.percentile(Y_trans, upper_percentile)
+            trans_used = "from_percentile_transformed"
+
+        # Safety: avoid zero division if min==max after transform
+        if self.trans_max == self.trans_min:
+            self.trans_max = self.trans_min + 1.0
+            print("[WARN] Transformed Y max equals min; adjusted to avoid division by zero.")
+
         print(f"[INFO] Dataset Loaded. X Range: [0.0, {self.x_max:.2f}]")
-        print(f"[INFO] Y Normalization: [{self.min_vel:.2f}, {self.max_vel:.2f}]")
+        print(f"[INFO] Y Normalization ({used}); transform={self.y_transform} scale={self.y_scale:.3f} -> trans_range ({trans_used}): [{self.trans_min:.3f}, {self.trans_max:.3f}]")
 
     def __len__(self):
         return self.N
@@ -242,8 +283,45 @@ class NPZSequenceDataset(Dataset):
         x = x / self.norm_const
 
         # --- STEP 3: NORMALIZE Y ---
+        y_raw = y.numpy()
         if self.clip_outliers:
-            y = torch.clamp(y, self.min_vel, self.max_vel)
-        y = 2 * (y - self.min_vel) / (self.max_vel - self.min_vel) - 1
-        
+            y_raw = np.clip(y_raw, self.min_vel, self.max_vel)
+
+        # Apply non-linear transform (in numpy), then scale to [-1,1]
+        if self.y_transform == 'asinh':
+            y_trans = np.arcsinh(y_raw / self.y_scale)
+        elif self.y_transform == 'signed_log':
+            y_trans = np.sign(y_raw) * np.log1p(np.abs(y_raw) / self.y_scale)
+        else:
+            y_trans = y_raw
+
+        # scale transformed values to [-1,1]
+        y_scaled = 2 * (y_trans - self.trans_min) / (self.trans_max - self.trans_min) - 1.0
+        y_scaled = y_scaled.astype(np.float32)
+
+        y = torch.from_numpy(y_scaled)
+
         return x, y, mask
+
+    def denormalize(self, y_norm: np.ndarray | torch.Tensor):
+        """Invert the dataset normalization. Accepts numpy array or torch tensor.
+
+        Returns raw y values in original units.
+        """
+        is_torch = False
+        if isinstance(y_norm, torch.Tensor):
+            is_torch = True
+            y_norm = y_norm.cpu().numpy()
+
+        y_trans = (y_norm + 1.0) / 2.0 * (self.trans_max - self.trans_min) + self.trans_min
+
+        if self.y_transform == 'asinh':
+            y_raw = np.sinh(y_trans) * self.y_scale
+        elif self.y_transform == 'signed_log':
+            y_raw = np.sign(y_trans) * (np.expm1(np.abs(y_trans)) * self.y_scale)
+        else:
+            y_raw = y_trans
+
+        if is_torch:
+            return torch.from_numpy(y_raw)
+        return y_raw

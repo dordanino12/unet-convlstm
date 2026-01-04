@@ -32,8 +32,8 @@ print("----------------------------------")
 
 nc_file.close()
 
-pkl_file = "/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_3D/BOMEX_512x512x200_20m_20m_1s_512_0000002000_0_3.pkl"
-with open(pkl_file, "rb") as f:
-    data = pickle.load(f)
-    print(data)
+# pkl_file = "/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_3D/BOMEX_512x512x200_20m_20m_1s_512_0000002000_0_3.pkl"
+# with open(pkl_file, "rb") as f:
+#     data = pickle.load(f)
+#     print(data)
 

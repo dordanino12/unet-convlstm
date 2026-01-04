@@ -103,7 +103,7 @@ def main():
         # --- FIX END ---
         
         # E. Process All Files (Loop)
-        for pkl_file in tqdm(pkl_files, desc="Rendering Files", leave=False):
+        for pkl_file in pkl_files:
             full_pkl_path = os.path.join(current_input_dir, pkl_file)
             
             try:
