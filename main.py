@@ -83,7 +83,9 @@ def train_one_epoch(model, loader, optimizer, device, dataset_obj, use_mask=True
     all_sq_err = [] 
     all_err = []
 
-    for x, y, mask in loader: #tqdm(loader, desc="Training", leave=False):
+    #for x, y, mask in loader: #tqdm(loader, desc="Training", leave=False):
+    for x, y, mask in tqdm(loader, desc="Training", leave=False):
+
         x, y, mask = x.to(device), y.to(device), mask.to(device)
         
         optimizer.zero_grad(set_to_none=True)
@@ -214,7 +216,10 @@ if __name__ == "__main__":
     EPOCHS = 200
     LR = 1e-3
     WEIGHT_DECAY = 1e-4
-    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top.npz"
+    USE_MASK = False
+    min_y = None  # 7.5987958908081055
+    max_y = None  # 8.784920692443848
+    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_500m_slices_w.npz"
     
     CUSTOM_CFG = {
         'base_ch': 64,
@@ -230,7 +235,7 @@ if __name__ == "__main__":
         print(f"ERROR: Dataset not found at {NPZ_PATH}")
         exit(1)
 
-    dataset = NPZSequenceDataset(NPZ_PATH)
+    dataset = NPZSequenceDataset(NPZ_PATH, min_y=min_y, max_y=max_y)
     print(f"Dataset length: {len(dataset)}")
     
     n_train = int(0.8 * len(dataset))
@@ -254,7 +259,7 @@ if __name__ == "__main__":
             lr=LR, 
             weight_decay=WEIGHT_DECAY
         )
-        model_name = "resnet18_frozen_2lstm_layers_min_max"
+        model_name = "resnet18_frozen_2lstm_layers_500m_slice"
         
     else:
         print("[INFO] Initializing Custom Temporal U-Net...")
@@ -283,11 +288,11 @@ if __name__ == "__main__":
 
     for epoch in range(1, EPOCHS + 1):
         tr_loss, tr_mae, tr_rmse, tr_me = train_one_epoch(
-            model, train_loader, optimizer, device, dataset, use_mask=True
+            model, train_loader, optimizer, device, dataset, use_mask=USE_MASK
         )
         
         val_loss, val_mae, val_rmse, val_me = evaluate(
-            model, val_loader, device, dataset, use_mask=True
+            model, val_loader, device, dataset, use_mask=USE_MASK
         )
         
         # Update scheduler based on Val Loss

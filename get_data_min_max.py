@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Path to your npz file
-npz_path = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top.npz"
+npz_path = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_500m_slices_w.npz"
 
 # Load the npz file
 print(f"[INFO] Loading data from {npz_path}...")

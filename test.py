@@ -25,7 +25,7 @@ from plots.create_video_dashboard3d_from_samples import create_3d_plot_img, load
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK = True
+USE_MASK = False
 SHOW_MASK_IMG = True
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -33,11 +33,14 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 GAMMA_VAL = 0.5  # < 1.0 brightens, > 1.0 darkens
 COLORBAR_STEP = 1.0  # Sets the numerical jump (e.g., every 1 m/s)
 COLORBAR_FONT_SIZE = 14  # <--- NEW: Sets the font size for the numbers
+min_y = None  # 7.5987958908081055
+max_y = None  # 8.784920692443848
+focus_thresh = 1.0
 
 # Paths
-NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top.npz"
-CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_min_max_best_skip.pt"
-SEQUENCE_IDX = 1000
+NPZ_PATH = "data/dataset_trajectory_sequences_samples_500m_slices_w.npz"
+CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_500m_slice_best_skip.pt"
+SEQUENCE_IDX = 1500
 CSV_PATH = "data/Dor_2satellites_overpass.csv"
 VIDEO_FPS = 1
 
@@ -75,7 +78,7 @@ model.eval()
 # -----------------------------
 # 3. Run Inference
 # -----------------------------
-dataset = NPZSequenceDataset(NPZ_PATH)
+dataset = NPZSequenceDataset(NPZ_PATH, min_y=min_y, max_y=max_y)
 input_seq, gt_vel_seq, mask_seq = dataset[SEQUENCE_IDX]
 T, C, H, W = input_seq.shape
 
@@ -89,25 +92,29 @@ vmax_fixed = dataset.max_vel
 
 # --- Non-linear color normalization to emphasize -3..3 while keeping full range ---
 # Use SymLogNorm with a linear threshold around `focus_thresh` (e.g., 3 m/s)
-focus_thresh = 3.0
 norm = mcolors.SymLogNorm(linthresh=focus_thresh, linscale=1.0, vmin=vmin_fixed, vmax=vmax_fixed)
 
-# Create a `jet`-based colormap but force the color at value 0 (according to `norm`) to black.
-# We build a ListedColormap from `jet` and replace the color bin closest to zero with black
-# (and a one-bin neighborhood) so the original `jet` colors are preserved otherwise.
+# Create a `jet`-based colormap
 base_cmap = plt.get_cmap('jet', 256)
 colors = base_cmap(np.linspace(0.0, 1.0, 256))
-try:
-    zero_pos = norm(0.0)
-    if np.isnan(zero_pos):
+
+# --- UPDATED LOGIC HERE ---
+# Only force zero-values to black if USE_MASK is True.
+if USE_MASK:
+    try:
+        zero_pos = norm(0.0)
+        if np.isnan(zero_pos):
+            zero_pos = 0.5
+    except Exception:
         zero_pos = 0.5
-except Exception:
-    zero_pos = 0.5
-idx = int(np.clip(np.round(zero_pos * (len(colors) - 1)), 0, len(colors) - 1))
-# make a small black band around the zero index
-for i in range(max(0, idx - 1), min(len(colors), idx + 2)):
-    colors[i] = np.array([0.0, 0.0, 0.0, 1.0])
-cmap_custom = mcolors.ListedColormap(colors, name='jet_mid_black')
+
+    idx = int(np.clip(np.round(zero_pos * (len(colors) - 1)), 0, len(colors) - 1))
+
+    # make a small black band around the zero index
+    for i in range(max(0, idx - 1), min(len(colors), idx + 2)):
+        colors[i] = np.array([0.0, 0.0, 0.0, 1.0])
+
+cmap_custom = mcolors.ListedColormap(colors, name='jet_custom')
 
 print(f"[INFO] Running inference on sequence {SEQUENCE_IDX}...")
 
@@ -207,9 +214,9 @@ for t_len in range(1, T + 1):
     # --- Plotting Preparation ---
     if USE_MASK:
         pred_frame = pred_frame * mask_frame
-        gt_frame = gt_frame * mask_frame  
+        gt_frame = gt_frame * mask_frame
 
-    # Use fixed plotting range so the color scale is stable across frames
+        # Use fixed plotting range so the color scale is stable across frames
     vmin_plot = vmin_fixed
     vmax_plot = vmax_fixed
 
