@@ -208,7 +208,7 @@ class TemporalUNetDualView(nn.Module):
 # NPZ Dataset loader with velocity normalization [-1,1]
 # -----------------------------------------------------
 class NPZSequenceDataset(Dataset):
-    def __init__(self, npz_path, lower_percentile=0.1, upper_percentile=99.9, clip_outliers=True, min_y=-7.5987958908081055, max_y= 8.784920692443848, y_transform='asinh', y_transform_scale=None, y_transform_percentile=99):
+    def __init__(self, npz_path, lower_percentile=0.00001, upper_percentile=99.99999, clip_outliers=True, min_y=-7.5987958908081055, max_y= 8.784920692443848, y_transform='asinh', y_transform_scale=None, y_transform_percentile=99):
         data = np.load(npz_path)
         self.X = data["X"].astype(np.float32)
         self.Y = data["Y"].astype(np.float32)
