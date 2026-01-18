@@ -1,0 +1,7 @@
+new server : 132.28.58.142
+
+nohup python my_script.py > output.log 2>&1 &
+
+To kill it :
+Run : ps aux | grep python
+Then run : kill "pid number"
