@@ -206,8 +206,6 @@ class MitsubaRenderer:
         ze_rad = np.deg2rad(s_zenith)
 
         # Standard spherical to cartesian "direction to" vector
-        # This assumes Z is up, Y is North (azimuth=0)
-        # The vector points *from* the sun *towards* the origin.
         dir_x = -np.sin(ze_rad) * np.sin(az_rad)
         dir_y = -np.sin(ze_rad) * np.cos(az_rad)
         dir_z = np.cos(ze_rad)
@@ -221,30 +219,30 @@ class MitsubaRenderer:
             # --- [NEW BLOCK] ---
             # This object represents the low-density "air"
             # that fills the entire scene.
-            'atmosphere': {
-                'type': 'cube',
-                'bsdf': {'type': 'null'},  # Invisible container
-                # This transform creates a massive 1000km-wide cube
-                # centered at the world origin, filling the whole scene.
-                'to_world': mi.scalar_rgb.Transform4f.scale(1000),
-                'interior': {
-                    'type': 'homogeneous',
-                    'albedo': {
-                        'type': 'rgb',
-                        'value': 1.0
-                    },  # Pure white scattering
-                    'phase': {
-                        'type': 'hg',
-                        'g': 0.0  # Isotropic scattering (g=0) is a good
-                        # approximation for air, scattering light
-                        # equally in all directions.
-                    },
-                    'sigma_t': {
-                        'type': 'rgb',
-                        'value': 0.00001
-                    }
-                }
-            },
+            # 'atmosphere': {
+            #     'type': 'cube',
+            #     'bsdf': {'type': 'null'},  # Invisible container
+            #     # This transform creates a massive 1000km-wide cube
+            #     # centered at the world origin, filling the whole scene.
+            #     'to_world': mi.scalar_rgb.Transform4f.scale(1000),
+            #     'interior': {
+            #         'type': 'homogeneous',
+            #         'albedo': {
+            #             'type': 'rgb',
+            #             'value': 1.0
+            #         },  # Pure white scattering
+            #         'phase': {
+            #             'type': 'hg',
+            #             'g': 0.0  # Isotropic scattering (g=0) is a good
+            #             # approximation for air, scattering light
+            #             # equally in all directions.
+            #         },
+            #         'sigma_t': {
+            #             'type': 'rgb',
+            #             'value': 0.00001
+            #         }
+            #     }
+            # },
             # --- [END OF MODIFICATION] ---
             'object': {  # transparent cube to contain our volume. The interior is the VOL we wrote
                 'type': 'cube',
@@ -288,7 +286,7 @@ class MitsubaRenderer:
                     'type': 'diffuse',
                     'reflectance': {
                         'type': 'rgb',
-                        'value': 0.03
+                        'value': 0.0003
                     }
                 }
             }
