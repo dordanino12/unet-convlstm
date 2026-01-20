@@ -278,18 +278,18 @@ class MitsubaRenderer:
                 }
             },
 
-            'ocean': {  # trying to emulate the ocean
-                'type': 'cube',
-                'to_world': mi.scalar_rgb.Transform4f.scale((self.W / 2 + 4) * 1e3 / self.scene_scale).translate(
-                    [0, 0, -(self.W / 2 + 4) * 1e3 / self.scene_scale]),
-                'bsdf': {  # Smooth diffuse BSDF
-                    'type': 'diffuse',
-                    'reflectance': {
-                        'type': 'rgb',
-                        'value': 0.0003
-                    }
-                }
-            }
+            # 'ocean': {  # trying to emulate the ocean
+            #     'type': 'cube',
+            #     'to_world': mi.scalar_rgb.Transform4f.scale((self.W / 2 + 4) * 1e3 / self.scene_scale).translate(
+            #         [0, 0, -(self.W / 2 + 4) * 1e3 / self.scene_scale]),
+            #     'bsdf': {  # Smooth diffuse BSDF
+            #         'type': 'diffuse',
+            #         'reflectance': {
+            #             'type': 'rgb',
+            #             'value': 0.0003
+            #         }
+            #     }
+            # }
         }
         return scene_dict
 
