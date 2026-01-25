@@ -101,15 +101,16 @@ def generate_patches_from_nc(nc_path, output_dir):
     print(f"Finished {os.path.basename(nc_path)}: Generated {count} patches.")
 
 
-def process_all_nc_files(input_folder, base_output_folder, start_from_folder=None):
+def process_all_nc_files(input_folder, base_output_folder, start_from_folder=None, end_at_folder=None):
     """
     Finds all .nc files in input_folder, SORTS THEM NUMERICALLY, and processes them.
-    If start_from_folder is provided, only processes files from that folder onwards.
-    
+    You can optionally bound the processing range by start and end folder numbers.
+
     Args:
         input_folder: Path to folder containing .nc files
         base_output_folder: Base path for output
         start_from_folder: Optional folder number/name to start from (e.g., "0000015860")
+        end_at_folder: Optional folder number/name to stop at (inclusive, e.g., "0000017000")
     """
     # Find all .nc files
     nc_files = glob.glob(os.path.join(input_folder, "*.nc"))
@@ -138,6 +139,17 @@ def process_all_nc_files(input_folder, base_output_folder, start_from_folder=Non
         except ValueError:
             print(f"Warning: Could not parse start_from_folder '{start_from_folder}'. Processing all files.")
 
+    # Filter files if end_at_folder is specified (inclusive)
+    if end_at_folder:
+        try:
+            end_num = int(end_at_folder)
+            initial_count = len(nc_files)
+            nc_files = [f for f in nc_files if int(os.path.splitext(os.path.basename(f))[0].split('_')[-1]) <= end_num]
+            print(f"Stopping at folder: {end_at_folder}")
+            print(f"Filtered from {initial_count} to {len(nc_files)} files after applying end bound.")
+        except ValueError:
+            print(f"Warning: Could not parse end_at_folder '{end_at_folder}'. Processing all files.")
+
     print(f"Found {len(nc_files)} NetCDF files. Starting process...")
     print("-" * 50)
 
@@ -165,7 +177,8 @@ if __name__ == "__main__":
     output_directory = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)_fixed/'
     
     # Optional: Start from a specific folder (e.g., "0000015860")
-    # Set to None to process all files from the beginning
-    start_from_folder = "0000015820"  # Change to specific folder number to resume from there
-    
-    process_all_nc_files(input_directory, output_directory, start_from_folder)
+    # Optional: End at a specific folder (inclusive, e.g., "0000017000")
+    start_from_folder = "0000015860"  # Change to specific folder number to resume from there
+    end_at_folder = "0000015880"                # Change to specific folder number to stop there (inclusive)
+
+    process_all_nc_files(input_directory, output_directory, start_from_folder, end_at_folder)

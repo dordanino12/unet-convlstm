@@ -2,6 +2,26 @@ import numpy as np
 import pickle
 import matplotlib.pyplot as plt
 import os
+from matplotlib.colors import TwoSlopeNorm
+import matplotlib as mpl
+import matplotlib.ticker as ticker
+
+# Global font settings MUST be set FIRST before creating any figures
+mpl.rcParams.update({
+    'font.size': 60,              # base font size (bigger)
+    'axes.titlesize': 64,         # axes title size
+    'axes.labelsize': 56,         # X/Y label size
+    'xtick.labelsize': 52,        # x tick labels
+    'ytick.labelsize': 52,        # y tick labels
+    'legend.fontsize': 52,        # legend if used
+    'figure.titlesize': 68,       # figure suptitle
+    'figure.dpi': 300,
+    'savefig.dpi': 150,
+    # PDF font embedding to preserve sizes
+    'pdf.fonttype': 42,           # embed TrueType fonts
+    'ps.fonttype': 42,
+    'svg.fonttype': 'none',
+})
 
 
 class CloudRayCaster:
@@ -241,7 +261,7 @@ if __name__ == "__main__":
 
     # --- CONFIGURATION ---
     # Choose mode: 'first_hit' (Cloud Surface) or 'slice' (Specific Height)
-    render_mode = 'slice'
+    render_mode = 'first_hit'
     slice_height_m = 750.0  # Height in meters to slice (e.g., middle of cloud)
 
     print(f"Cam: {camera_pos}, Mode: {render_mode}")
@@ -266,40 +286,139 @@ if __name__ == "__main__":
         if len(valid_data) == 0: return fallback
         return np.percentile(np.abs(valid_data), 99)
 
-
     lim_u = get_dynamic_limit(u_map, fallback=10.0)
     lim_v = get_dynamic_limit(v_map, fallback=10.0)
     lim_w = 2.0  # Fixed for W
 
-    # --- Plotting ---
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    # --- Resolution-dependent pixel size ---
+    H, W = u_map.shape
+    if W == 128:
+        m_per_pixel = 20
+    elif W == 256:
+        m_per_pixel = 10
+    else:
+        m_per_pixel = 20  # default fallback
+
+    # --- Helper to set centered axes ---
+    def set_centered_meter_axis(ax, height, width, m_per_pixel):
+        """
+        Set X and Y axes in meters with (0,0) at the center.
+        Fix axis limits to [-1280, 1280] meters.
+        Show intermediate ticks to avoid overlap.
+        """
+        # Fixed meter range
+        ax.set_xlim(-1280, 1280)
+        ax.set_ylim(1280, -1280)  # invert Y so top is positive in image coordinates
+
+        # Build ticks WITHOUT first and last values to prevent overlap
+        # Show: -1100, -640, 0, 640, 1100 instead of -1280, -640, 0, 640, 1280
+        tick_vals = np.array([-1100, -640, 0, 640, 1100])
+        ax.set_xticks(tick_vals)
+        ax.set_yticks(tick_vals)
+        ax.set_xticklabels([f"{int(v)}" for v in tick_vals], fontsize=48, fontweight='bold')
+        ax.set_yticklabels([f"{int(v)}" for v in tick_vals], fontsize=48, fontweight='bold')
+        ax.set_xlabel('X [m]', fontsize=52, fontweight='bold')
+        ax.set_ylabel('Y [m]', fontsize=52, fontweight='bold')
+
+    # --- Plotting with centered axes and jet colormap ---
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     current_cmap = plt.cm.jet.copy()
     current_cmap.set_bad(color='black')
 
+    # Mask zeros to show them as black
+    u_plot = np.ma.masked_where(u_map == 0, u_map)
+    v_plot = np.ma.masked_where(v_map == 0, v_map)
+    w_plot = np.ma.masked_where(w_map == 0, w_map)
+
+    # Create normalization for each component (using vmin/vmax with jet)
+    from matplotlib.colors import Normalize
+    norm_u = Normalize(vmin=-lim_u, vmax=lim_u)
+    norm_v = Normalize(vmin=-lim_v, vmax=lim_v)
+    norm_w = Normalize(vmin=-lim_w, vmax=lim_w)
+
+    # Compute extent in meters so that (0,0) is centered and axes are in meters
+    half_w_m = (W * m_per_pixel) / 2.0
+    half_h_m = (H * m_per_pixel) / 2.0
+    extent_m = [-half_w_m, half_w_m, half_h_m, -half_h_m]
+
     # Plot U
-    im0 = axes[0].imshow(u_map, cmap=current_cmap, vmin=-lim_u, vmax=lim_u)
-    axes[0].set_title(f"{title_prefix} - Velocity U\nLimit: +/-{lim_u:.1f}")
-    axes[0].axis('off')
-    plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+    im0 = axes[0].imshow(u_plot, cmap=current_cmap, norm=norm_u, extent=extent_m, interpolation='nearest')
+    axes[0].set_title(f"{title_prefix} - Velocity U [m/s]\nLimit: +/-{lim_u:.1f}", pad=24, fontsize=20, fontweight='bold')
+    set_centered_meter_axis(axes[0], H, W, m_per_pixel)
+    cbar0 = plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+    cbar0.ax.tick_params(labelsize=22)
+    cbar0.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+    cbar0.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
 
     # Plot V
-    im1 = axes[1].imshow(v_map, cmap=current_cmap, vmin=-lim_v, vmax=lim_v)
-    axes[1].set_title(f"{title_prefix} - Velocity V\nLimit: +/-{lim_v:.1f}")
-    axes[1].axis('off')
-    plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+    im1 = axes[1].imshow(v_plot, cmap=current_cmap, norm=norm_v, extent=extent_m, interpolation='nearest')
+    axes[1].set_title(f"{title_prefix} - Velocity V [m/s]\nLimit: +/-{lim_v:.1f}", pad=24, fontsize=20, fontweight='bold')
+    set_centered_meter_axis(axes[1], H, W, m_per_pixel)
+    cbar1 = plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+    cbar1.ax.tick_params(labelsize=22)
+    cbar1.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+    cbar1.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
 
     # Plot W
-    im2 = axes[2].imshow(w_map, cmap=current_cmap, vmin=-lim_w, vmax=lim_w)
-    axes[2].set_title(f"{title_prefix} - Velocity W\nLimit: +/-{lim_w:.1f}")
-    axes[2].axis('off')
-    plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+    im2 = axes[2].imshow(w_plot, cmap=current_cmap, norm=norm_w, extent=extent_m, interpolation='nearest')
+    axes[2].set_title(f"{title_prefix} - Velocity W [m/s]\nLimit: +/-{lim_w:.1f}", pad=24, fontsize=20, fontweight='bold')
+    set_centered_meter_axis(axes[2], H, W, m_per_pixel)
+    cbar2 = plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+    cbar2.ax.tick_params(labelsize=22)
+    cbar2.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+    cbar2.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
 
+    # --- Saving with proper colormaps ---
+    print("Saving PDFs...")
+    # Save U
+    fig_u, ax_u = plt.subplots(figsize=(12, 12), dpi=150)
+    im_u = ax_u.imshow(u_plot, cmap=current_cmap, norm=norm_u, extent=extent_m, interpolation='nearest')
+    ax_u.set_title(f"{title_prefix} - Velocity U [m/s]", fontsize=56, fontweight='bold', pad=40)
+    set_centered_meter_axis(ax_u, H, W, m_per_pixel)
+    cbar_u = plt.colorbar(im_u, ax=ax_u, fraction=0.046, pad=0.04)
+    cbar_u.ax.tick_params(labelsize=48)
+    cbar_u.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+    cbar_u.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
     plt.tight_layout()
-    plt.show()
+    # Save PDF only
+    fig_u.set_size_inches(20, 20)
+    plt.subplots_adjust(left=0.17, right=0.92, top=0.95, bottom=0.08)
+    plt.savefig(os.path.join(output_dir, f"{file_prefix}_U.pdf"), dpi=150)
+    plt.close(fig_u)
+    print(f"  Saved: {file_prefix}_U.pdf")
 
-    # --- Saving ---
-    print("Saving raw images...")
-    plt.imsave(os.path.join(output_dir, f"{file_prefix}_U_raw.png"), u_map, cmap=current_cmap, vmin=-lim_u, vmax=lim_u)
-    plt.imsave(os.path.join(output_dir, f"{file_prefix}_V_raw.png"), v_map, cmap=current_cmap, vmin=-lim_v, vmax=lim_v)
-    plt.imsave(os.path.join(output_dir, f"{file_prefix}_W_raw.png"), w_map, cmap=current_cmap, vmin=-lim_w, vmax=lim_w)
+    # Save V
+    fig_v, ax_v = plt.subplots(figsize=(12, 12), dpi=150)
+    im_v = ax_v.imshow(v_plot, cmap=current_cmap, norm=norm_v, extent=extent_m, interpolation='nearest')
+    ax_v.set_title(f"{title_prefix} - Velocity V [m/s]", fontsize=56, fontweight='bold', pad=40)
+    set_centered_meter_axis(ax_v, H, W, m_per_pixel)
+    cbar_v = plt.colorbar(im_v, ax=ax_v, fraction=0.046, pad=0.04)
+    cbar_v.ax.tick_params(labelsize=48)
+    cbar_v.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+    cbar_v.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+    plt.tight_layout()
+    # Save PDF only
+    fig_v.set_size_inches(20, 20)
+    plt.subplots_adjust(left=0.17, right=0.92, top=0.95, bottom=0.08)
+    plt.savefig(os.path.join(output_dir, f"{file_prefix}_V.pdf"), dpi=150)
+    plt.close(fig_v)
+    print(f"  Saved: {file_prefix}_V.pdf")
+
+    # Save W
+    fig_w, ax_w = plt.subplots(figsize=(12, 12), dpi=150)
+    im_w = ax_w.imshow(w_plot, cmap=current_cmap, norm=norm_w, extent=extent_m, interpolation='nearest')
+    ax_w.set_title(f"{title_prefix} - Velocity W [m/s]", fontsize=56, fontweight='bold', pad=40)
+    set_centered_meter_axis(ax_w, H, W, m_per_pixel)
+    cbar_w = plt.colorbar(im_w, ax=ax_w, fraction=0.046, pad=0.04)
+    cbar_w.ax.tick_params(labelsize=48)
+    cbar_w.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+    cbar_w.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+    plt.tight_layout()
+    # Save PDF only
+    fig_w.set_size_inches(20, 20)
+    plt.subplots_adjust(left=0.17, right=0.92, top=0.95, bottom=0.08)
+    plt.savefig(os.path.join(output_dir, f"{file_prefix}_W.pdf"), dpi=150)
+    plt.close(fig_w)
+    print(f"  Saved: {file_prefix}_W.pdf")
+
     print("Done.")

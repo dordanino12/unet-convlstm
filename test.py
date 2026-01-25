@@ -25,7 +25,7 @@ from plots.create_video_dashboard3d_from_samples import create_3d_plot_img, load
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK = False
+USE_MASK = True
 SHOW_MASK_IMG = True
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -33,14 +33,14 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 GAMMA_VAL = 0.5  # < 1.0 brightens, > 1.0 darkens
 COLORBAR_STEP = 1.0  # Sets the numerical jump (e.g., every 1 m/s)
 COLORBAR_FONT_SIZE = 14  # <--- NEW: Sets the font size for the numbers
-min_y = None  # 7.5987958908081055
-max_y = None  # 8.784920692443848
-focus_thresh = 1.0
+min_y = None #7.5987958908081055
+max_y = None# 8.784920692443848
+focus_thresh = 3.0
 
 # Paths
-NPZ_PATH = "data/dataset_trajectory_sequences_samples_500m_slices_w.npz"
-CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_500m_slice_best_skip.pt"
-SEQUENCE_IDX = 1500
+NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top.npz"
+CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
+SEQUENCE_IDX = 1000
 CSV_PATH = "data/Dor_2satellites_overpass.csv"
 VIDEO_FPS = 1
 
@@ -222,8 +222,8 @@ for t_len in range(1, T + 1):
 
     # --- Figure Layout Logic ---
     if have_geo:
-        fig = plt.figure(figsize=(16, 8))
-        gs = fig.add_gridspec(2, 3, width_ratios=[1, 1, 1], hspace=0.2, wspace=0.1)
+        fig = plt.figure(figsize=(16, 9))
+        gs = fig.add_gridspec(2, 3, width_ratios=[1, 1, 1], hspace=0.35, wspace=0.15)
         axes = np.empty((2, 3), dtype=object)
 
         # Col 0: Inputs
@@ -255,24 +255,44 @@ for t_len in range(1, T + 1):
              verticalalignment='top', horizontalalignment='left',
              bbox=dict(facecolor='white', alpha=0.9, edgecolor='gray', boxstyle='round,pad=0.5'))
 
+    # --- Helper function to set meters axis ---
+    def set_km_axis(ax, height, width):
+        """Set axis ticks and labels in meters (each pixel = 20 m)"""
+        m_per_pixel = 20
+
+        # Set x-axis
+        x_ticks_px = np.linspace(0, width - 1, 5)
+        x_ticks_m = x_ticks_px * m_per_pixel
+        ax.set_xticks(x_ticks_px)
+        ax.set_xticklabels([f'{int(m)}' for m in x_ticks_m], fontsize=10)
+        ax.set_xlabel('X [m]', fontsize=11, fontweight='bold')
+
+        # Set y-axis
+        y_ticks_px = np.linspace(0, height - 1, 5)
+        y_ticks_m = y_ticks_px * m_per_pixel
+        ax.set_yticks(y_ticks_px)
+        ax.set_yticklabels([f'{int(m)}' for m in y_ticks_m], fontsize=10)
+        ax.set_ylabel('Y [m]', fontsize=11, fontweight='bold')
+
     # 1. Sat 0
     axes[0, 0].imshow(sat1, cmap='gray')
-    axes[0, 0].set_title("Input Sat 0", pad=8)
-    axes[0, 0].axis('off')
+    axes[0, 0].set_title("Input Sat 0", pad=20, fontsize=12, fontweight='bold')
+    set_km_axis(axes[0, 0], sat1.shape[0], sat1.shape[1])
 
     # 2. Sat 1
     axes[1, 0].imshow(sat2, cmap='gray')
-    axes[1, 0].set_title("Input Sat 1", pad=8)
-    axes[1, 0].axis('off')
+    axes[1, 0].set_title("Input Sat 1", pad=20, fontsize=12, fontweight='bold')
+    set_km_axis(axes[1, 0], sat2.shape[0], sat2.shape[1])
 
     # 3. GT (Top Middle)
     im1 = axes[0, 1].imshow(gt_frame, cmap=cmap_custom, norm=norm)
-    axes[0, 1].set_title("Ground True Velocity [m/s]", pad=8)
-    axes[0, 1].axis('off')
+    axes[0, 1].set_title("Ground True Velocity [m/s]", pad=15, fontsize=12, fontweight='bold')
+    set_km_axis(axes[0, 1], gt_frame.shape[0], gt_frame.shape[1])
 
     if have_geo:
         # ### NEW: Scale Bar Config ###
         cbar1 = fig.colorbar(im1, ax=axes[0, 1], fraction=0.046, pad=0.04)
+        cbar1.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
         # build ticks that include min, -focus_thresh, 0, focus_thresh, max (within bounds)
         ticks_parts = []
         if vmin_fixed < -focus_thresh:
@@ -290,12 +310,13 @@ for t_len in range(1, T + 1):
 
     # 4. Pred (Bottom Middle)
     im2 = axes[1, 1].imshow(pred_frame, cmap=cmap_custom, norm=norm)
-    axes[1, 1].set_title("Predicted Velocity [m/s]", pad=8)
-    axes[1, 1].axis('off')
+    axes[1, 1].set_title("Predicted Velocity [m/s]", pad=15, fontsize=12, fontweight='bold')
+    set_km_axis(axes[1, 1], pred_frame.shape[0], pred_frame.shape[1])
 
     if have_geo:
         # ### NEW: Scale Bar Config ###
         cbar2 = fig.colorbar(im2, ax=axes[1, 1], fraction=0.046, pad=0.04)
+        cbar2.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
         # reuse tick generation from above
         if ticks_parts:
             cbar2.set_ticks(ticks)
