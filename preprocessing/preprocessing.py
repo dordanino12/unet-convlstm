@@ -1,9 +1,15 @@
 import os
+import sys
 import pickle
 import numpy as np
 import glob
 from netCDF4 import Dataset
-# Assuming this module exists in your environment
+
+# Fix import path to allow importing from mitsuba3 subdirectory
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
+
 from mitsuba3.calc_beta import process_cloud_vars
 
 
@@ -30,7 +36,7 @@ def generate_patches_from_nc(nc_path, output_dir):
     y_len = nc.variables['y'].shape[0]  # 512
 
     # --- Configuration for 128x128 patches with overlap ---
-    patch_size = 512
+    patch_size = 128
     stride = 64  # This gives 50% overlap
 
     x_steps = (x_len - patch_size) // stride + 1
@@ -95,9 +101,15 @@ def generate_patches_from_nc(nc_path, output_dir):
     print(f"Finished {os.path.basename(nc_path)}: Generated {count} patches.")
 
 
-def process_all_nc_files(input_folder, base_output_folder):
+def process_all_nc_files(input_folder, base_output_folder, start_from_folder=None):
     """
     Finds all .nc files in input_folder, SORTS THEM NUMERICALLY, and processes them.
+    If start_from_folder is provided, only processes files from that folder onwards.
+    
+    Args:
+        input_folder: Path to folder containing .nc files
+        base_output_folder: Base path for output
+        start_from_folder: Optional folder number/name to start from (e.g., "0000015860")
     """
     # Find all .nc files
     nc_files = glob.glob(os.path.join(input_folder, "*.nc"))
@@ -114,6 +126,17 @@ def process_all_nc_files(input_folder, base_output_folder):
         print("Files sorted numerically.")
     except Exception as e:
         print(f"Warning: Could not sort numerically (filenames might not match format). Running default order. Error: {e}")
+
+    # Filter files if start_from_folder is specified
+    if start_from_folder:
+        try:
+            start_num = int(start_from_folder)
+            initial_count = len(nc_files)
+            nc_files = [f for f in nc_files if int(os.path.splitext(os.path.basename(f))[0].split('_')[-1]) >= start_num]
+            print(f"Starting from folder: {start_from_folder}")
+            print(f"Filtered from {initial_count} to {len(nc_files)} files.")
+        except ValueError:
+            print(f"Warning: Could not parse start_from_folder '{start_from_folder}'. Processing all files.")
 
     print(f"Found {len(nc_files)} NetCDF files. Starting process...")
     print("-" * 50)
@@ -139,6 +162,10 @@ def process_all_nc_files(input_folder, base_output_folder):
 if __name__ == "__main__":
     # Update these paths to your directories
     input_directory = '/wdata_visl/udigal/netCDF_20X20/'
-    output_directory = '/wdata_visl/danino/dataset_512x512x200_overlap_64_stride_7x7_split(beta,U,V,W)'
-
-    process_all_nc_files(input_directory, output_directory)
+    output_directory = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)_fixed/'
+    
+    # Optional: Start from a specific folder (e.g., "0000015860")
+    # Set to None to process all files from the beginning
+    start_from_folder = "0000015820"  # Change to specific folder number to resume from there
+    
+    process_all_nc_files(input_directory, output_directory, start_from_folder)
