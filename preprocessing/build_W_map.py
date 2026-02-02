@@ -246,7 +246,7 @@ class CloudRayCaster:
 
 # --- Usage Example ---
 if __name__ == "__main__":
-    pkl_file = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000007000/sample_019.pkl'
+    pkl_file = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000005920/sample_012.pkl'
     output_dir = "/home/danino/PycharmProjects/pythonProject/data/output/"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -261,8 +261,8 @@ if __name__ == "__main__":
 
     # --- CONFIGURATION ---
     # Choose mode: 'first_hit' (Cloud Surface) or 'slice' (Specific Height)
-    render_mode = 'first_hit'
-    slice_height_m = 750.0  # Height in meters to slice (e.g., middle of cloud)
+    render_mode = 'slice'
+    slice_height_m = 500.0  # Height in meters to slice (e.g., middle of cloud)
 
     print(f"Cam: {camera_pos}, Mode: {render_mode}")
 
@@ -305,6 +305,7 @@ if __name__ == "__main__":
         Set X and Y axes in meters with (0,0) at the center.
         Fix axis limits to [-1280, 1280] meters.
         Show intermediate ticks to avoid overlap.
+        Add tick lines connecting labels to the image.
         """
         # Fixed meter range
         ax.set_xlim(-1280, 1280)
@@ -317,6 +318,18 @@ if __name__ == "__main__":
         ax.set_yticks(tick_vals)
         ax.set_xticklabels([f"{int(v)}" for v in tick_vals], fontsize=48, fontweight='bold')
         ax.set_yticklabels([f"{int(v)}" for v in tick_vals], fontsize=48, fontweight='bold')
+
+        # Enable tick marks with custom styling
+        ax.tick_params(
+            axis='both',
+            which='major',
+            direction='out',  # ticks point outward from plot
+            length=14,        # length of tick lines
+            width=4,          # width of tick lines
+            color='black',    # color of tick lines
+            labelsize=48
+        )
+
         ax.set_xlabel('X [m]', fontsize=52, fontweight='bold')
         ax.set_ylabel('Y [m]', fontsize=52, fontweight='bold')
 

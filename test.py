@@ -35,7 +35,7 @@ COLORBAR_STEP = 1.0  # Sets the numerical jump (e.g., every 1 m/s)
 COLORBAR_FONT_SIZE = 14  # <--- NEW: Sets the font size for the numbers
 min_y = None #7.5987958908081055
 max_y = None# 8.784920692443848
-focus_thresh = 3.0
+focus_thresh = 2.0
 
 # Paths
 NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top.npz"

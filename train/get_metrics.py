@@ -4,6 +4,24 @@ import os
 import sys
 import matplotlib.pyplot as plt
 from tqdm import tqdm  # Progress bar
+import matplotlib as mpl
+
+# Global font settings MUST be set FIRST before creating any figures
+mpl.rcParams.update({
+    'font.size': 60,              # base font size (bigger)
+    'axes.titlesize': 64,         # axes title size
+    'axes.labelsize': 56,         # X/Y label size
+    'xtick.labelsize': 52,        # x tick labels
+    'ytick.labelsize': 52,        # y tick labels
+    'legend.fontsize': 52,        # legend if used
+    'figure.titlesize': 68,       # figure suptitle
+    'figure.dpi': 300,
+    'savefig.dpi': 150,
+    # PDF font embedding to preserve sizes
+    'pdf.fonttype': 42,           # embed TrueType fonts
+    'ps.fonttype': 42,
+    'svg.fonttype': 'none',
+})
 
 # ---------------------------------------------------------
 # FIX IMPORT PATH
@@ -24,9 +42,11 @@ USE_MASK = True
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Paths
-NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_500m_slices_w.npz"
-#CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_500m_slice_best_skip.pt"
+NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top.npz"
+CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
+#CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_500m_slice_best_skip.pt"
+save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
+output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
@@ -169,22 +189,9 @@ if len(scatter_gt_list) > 0:
     print("=" * 40)
 
     # -----------------------------
-    # 5. Generate Multi-Panel Plots
+    # 5. Generate Individual PDF Plots
     # -----------------------------
-    print("[INFO] Generating Plots...")
-
-    # Create a figure with GridSpec layout
-    fig = plt.figure(figsize=(20, 11))
-
-    fig.suptitle(f"Validation Set Evaluation Results", fontsize=20, fontweight='bold')
-
-    gs = fig.add_gridspec(2, 3)
-
-    ax_scatter = fig.add_subplot(gs[0, 0])
-    ax_time = fig.add_subplot(gs[0, 1:])  # Span 2 columns
-    ax_hist_gt = fig.add_subplot(gs[1, 0])
-    ax_hist_pred = fig.add_subplot(gs[1, 1])
-    ax_hist_err = fig.add_subplot(gs[1, 2])
+    print("[INFO] Generating Individual PDF Plots...")
 
     # --- 1. SCATTER PLOT (Updated: Balanced/Stratified Sampling) ---
     print(f"[INFO] Performing Balanced Sampling for Scatter Plot...")
@@ -228,16 +235,22 @@ if len(scatter_gt_list) > 0:
         x_scatter = all_gt
         y_scatter = all_pred
 
-    # Plot
-    ax_scatter.scatter(x_scatter, y_scatter, c='tab:blue', s=4, alpha=0.3)
-
-    ax_scatter.plot([-7.5, 7.5], [-7.5, 7.5], 'k--', lw=1.5)
-    ax_scatter.set_xlabel("Ground Truth [m/s]")
-    ax_scatter.set_ylabel("Predicted [m/s]")
-    ax_scatter.set_title(f"Balanced Scatter Plot (Fixed {POINTS_PER_BIN}/bin)")
+    # Create scatter plot figure
+    fig_scatter, ax_scatter = plt.subplots(figsize=(20, 20), dpi=150)
+    ax_scatter.scatter(x_scatter, y_scatter, c='tab:blue', s=8, alpha=0.3)
+    ax_scatter.plot([-7.5, 7.5], [-7.5, 7.5], 'k--', lw=4)
+    ax_scatter.set_xlabel("Ground Truth [m/s]", fontsize=56, fontweight='bold')
+    ax_scatter.set_ylabel("Predicted [m/s]", fontsize=56, fontweight='bold')
+    ax_scatter.set_title(f"Balanced Scatter Plot", fontsize=64, fontweight='bold', pad=40)
     ax_scatter.set_xlim(-7.5, 7.5)
     ax_scatter.set_ylim(-7.5, 7.5)
-    ax_scatter.grid(True, alpha=0.3)
+    ax_scatter.grid(True, alpha=0.3, linewidth=2)
+    ax_scatter.tick_params(axis='both', which='major', labelsize=52)
+    plt.tight_layout()
+    scatter_path = os.path.join(output_dir, "scatter_plot.pdf")
+    plt.savefig(scatter_path, dpi=150)
+    plt.close(fig_scatter)
+    print(f"  Saved: scatter_plot.pdf")
 
     # --- 2. MAE OVER TIME (Updated: With Variance/Std Shading) ---
     unique_times = np.unique(all_time)
@@ -264,65 +277,84 @@ if len(scatter_gt_list) > 0:
     time_std = np.array(time_std)
     time_steps = np.array(time_steps)
 
-    # Plot Mean line
-    #ax_time.plot(time_steps, time_mae, 'o-', color='darkblue', lw=2, label='Mean Absolute Error')
-
-
-    ax_time.errorbar(time_steps, time_mae, yerr=time_std,
+    # Create MAE over time figure
+    fig_time, ax_time = plt.subplots(figsize=(24, 12), dpi=150)
+    upper_err = time_std
+    lower_err = np.zeros_like(time_std)
+    ax_time.errorbar(time_steps, time_mae, yerr=[lower_err, upper_err],
                      fmt='o-', color='darkblue', ecolor='red',
-                     elinewidth=2, capsize=4, label='MAE ± 1 Std Dev [m/s]')
-
-    ax_time.set_xlabel("Time Step")
-    ax_time.set_ylabel("MAE [m/s]")
+                     elinewidth=4, capsize=8, markersize=12, linewidth=4,
+                     label='MAE with Std Dev (above) [m/s]')
+    ax_time.set_xlabel("Time Step", fontsize=56, fontweight='bold')
+    ax_time.set_ylabel("MAE [m/s]", fontsize=56, fontweight='bold')
     ax_time.set_ylim(-1.5, 1.5)
-    ax_time.set_title("Mean Absolute Error & Variability over Sequence Time")
-    ax_time.grid(True, alpha=0.3)
-    ax_time.legend()
+    ax_time.set_title("Mean Absolute Error over Sequence Time", fontsize=64, fontweight='bold', pad=40)
+    ax_time.grid(True, alpha=0.3, linewidth=2)
+    ax_time.legend(fontsize=48, loc='best')
+    ax_time.tick_params(axis='both', which='major', labelsize=52)
+    plt.tight_layout()
+    time_path = os.path.join(output_dir, "mae_over_time.pdf")
+    plt.savefig(time_path, dpi=150)
+    plt.close(fig_time)
+    print(f"  Saved: mae_over_time.pdf")
 
     # --- 3. HISTOGRAMS ---
     hist_range = (-7.5, 7.5)
 
     # A. GT Distribution
     mu_gt, std_gt = np.mean(all_gt), np.std(all_gt)
-    ax_hist_gt.hist(all_gt, bins=HIST_BINS, range=hist_range, color='green', alpha=0.7, density=True)
-    ax_hist_gt.set_title(f"GT Distribution\n$\mu={mu_gt:.2f}, \sigma={std_gt:.2f}$")
-    ax_hist_gt.set_xlabel("Velocity [m/s]")
-    ax_hist_gt.set_ylabel("Density")
+    fig_hist_gt, ax_hist_gt = plt.subplots(figsize=(20, 16), dpi=150)
+    ax_hist_gt.hist(all_gt, bins=HIST_BINS, range=hist_range, color='green', alpha=0.7, density=True, linewidth=2)
+    ax_hist_gt.set_title(f"Ground Truth Distribution\n$\mu={mu_gt:.2f}, \sigma={std_gt:.2f}$",
+                         fontsize=64, fontweight='bold', pad=40)
+    ax_hist_gt.set_xlabel("Velocity [m/s]", fontsize=56, fontweight='bold')
+    ax_hist_gt.set_ylabel("Density", fontsize=56, fontweight='bold')
     ax_hist_gt.set_xlim(hist_range)
-    ax_hist_gt.grid(True, alpha=0.3)
+    ax_hist_gt.grid(True, alpha=0.3, linewidth=2)
+    ax_hist_gt.tick_params(axis='both', which='major', labelsize=52)
+    plt.tight_layout()
+    gt_hist_path = os.path.join(output_dir, "histogram_gt.pdf")
+    plt.savefig(gt_hist_path, dpi=150)
+    plt.close(fig_hist_gt)
+    print(f"  Saved: histogram_gt.pdf")
 
     # B. Pred Distribution
     mu_pred, std_pred = np.mean(all_pred), np.std(all_pred)
-    ax_hist_pred.hist(all_pred, bins=HIST_BINS, range=hist_range, color='orange', alpha=0.7, density=True)
-    ax_hist_pred.set_title(f"Prediction Distribution\n$\mu={mu_pred:.2f}, \sigma={std_pred:.2f}$")
-    ax_hist_pred.set_xlabel("Velocity [m/s]")
-    ax_hist_pred.set_ylabel("Density")
+    fig_hist_pred, ax_hist_pred = plt.subplots(figsize=(20, 16), dpi=150)
+    ax_hist_pred.hist(all_pred, bins=HIST_BINS, range=hist_range, color='orange', alpha=0.7, density=True, linewidth=2)
+    ax_hist_pred.set_title(f"Prediction Distribution\n$\mu={mu_pred:.2f}, \sigma={std_pred:.2f}$",
+                           fontsize=64, fontweight='bold', pad=40)
+    ax_hist_pred.set_xlabel("Velocity [m/s]", fontsize=56, fontweight='bold')
+    ax_hist_pred.set_ylabel("Density", fontsize=56, fontweight='bold')
     ax_hist_pred.set_xlim(hist_range)
-    ax_hist_pred.grid(True, alpha=0.3)
-
-    # UNIFY Y-AXIS FOR GT AND PRED
-    _, y_max_gt = ax_hist_gt.get_ylim()
-    _, y_max_pred = ax_hist_pred.get_ylim()
-    common_y_max = max(y_max_gt, y_max_pred)
-    ax_hist_gt.set_ylim(0, common_y_max)
-    ax_hist_pred.set_ylim(0, common_y_max)
+    ax_hist_pred.grid(True, alpha=0.3, linewidth=2)
+    ax_hist_pred.tick_params(axis='both', which='major', labelsize=52)
+    plt.tight_layout()
+    pred_hist_path = os.path.join(output_dir, "histogram_pred.pdf")
+    plt.savefig(pred_hist_path, dpi=150)
+    plt.close(fig_hist_pred)
+    print(f"  Saved: histogram_pred.pdf")
 
     # C. Error Distribution (Pred - GT)
     err_range = (-3, 3)
     mu_err, std_err = np.mean(all_diff), np.std(all_diff)
-    ax_hist_err.hist(all_diff, bins=HIST_BINS, range=err_range, color='red', alpha=0.7, density=True)
-    ax_hist_err.set_title(f"Error Distribution (Pred - GT)\n$\mu={mu_err:.2f}, \sigma={std_err:.2f}$")
-    ax_hist_err.set_xlabel("Error [m/s]")
-    ax_hist_err.set_ylabel("Density")
+    fig_hist_err, ax_hist_err = plt.subplots(figsize=(20, 16), dpi=150)
+    ax_hist_err.hist(all_diff, bins=HIST_BINS, range=err_range, color='red', alpha=0.7, density=True, linewidth=2)
+    ax_hist_err.set_title(f"Error Distribution (Pred - GT)\n$\mu={mu_err:.2f}, \sigma={std_err:.2f}$",
+                          fontsize=64, fontweight='bold', pad=40)
+    ax_hist_err.set_xlabel("Error [m/s]", fontsize=56, fontweight='bold')
+    ax_hist_err.set_ylabel("Density", fontsize=56, fontweight='bold')
     ax_hist_err.set_xlim(err_range)
-    ax_hist_err.grid(True, alpha=0.3)
-    ax_hist_err.axvline(0, color='k', linestyle='--', lw=1)
+    ax_hist_err.grid(True, alpha=0.3, linewidth=2)
+    ax_hist_err.axvline(0, color='k', linestyle='--', lw=4)
+    ax_hist_err.tick_params(axis='both', which='major', labelsize=52)
+    plt.tight_layout()
+    err_hist_path = os.path.join(output_dir, "histogram_error.pdf")
+    plt.savefig(err_hist_path, dpi=150)
+    plt.close(fig_hist_err)
+    print(f"  Saved: histogram_error.pdf")
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive_slice_500m.png"
-    plt.savefig(save_path, dpi=150)
-    print(f"[INFO] Plot saved to {save_path}")
-    # plt.show()
+    print(f"[INFO] All individual PDFs saved to {output_dir}")
 
 else:
     print("[WARNING] No valid pixels found to plot.")
