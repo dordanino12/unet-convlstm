@@ -5,6 +5,7 @@ import sys
 import matplotlib.pyplot as plt
 from tqdm import tqdm  # Progress bar
 import matplotlib as mpl
+from PIL import Image
 
 # Global font settings MUST be set FIRST before creating any figures
 mpl.rcParams.update({
@@ -38,19 +39,20 @@ from train.resnet18 import PretrainedTemporalUNet
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK = True
+USE_MASK = False
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Paths
-NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
-#CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_500m_slice_best_skip.pt"
+#NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top.npz"
+#CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
+NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_1000m_slices_w.npz"
+CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_1000m_slice_best_skip.pt"
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
-SCATTER_BIN_WIDTH = 0.5  # Width of each velocity bin (e.g., 0.5 m/s)
+SCATTER_BIN_WIDTH = 0.05  # Width of each velocity bin (e.g., 0.5 m/s)
 POINTS_PER_BIN = 1000  # How many points to sample from each bin (The "X" you requested)
 SCATTER_RANGE = (-8.0, 8.0)  # Range to define bins over
 
@@ -156,8 +158,15 @@ for i in tqdm(range(len(val_ds)), desc="Evaluating"):
         # No mask logic
         seq_gt_vals = gt_vel_denorm.cpu().numpy().flatten()
         seq_pred_vals = pred_vel_denorm.flatten()
-        T, H, W = gt_vel_denorm.shape
-        seq_time_vals = np.repeat(np.arange(T), H * W)
+        # Handle both 3D (T, H, W) and 4D (T, C, H, W) shapes
+        gt_shape = gt_vel_denorm.shape
+        if len(gt_shape) == 4:
+            T, C, H, W = gt_shape
+            pixels_per_frame = C * H * W
+        else:
+            T, H, W = gt_shape
+            pixels_per_frame = H * W
+        seq_time_vals = np.repeat(np.arange(T), pixels_per_frame)
 
         scatter_gt_list.append(seq_gt_vals)
         scatter_pred_list.append(seq_pred_vals)
@@ -235,15 +244,31 @@ if len(scatter_gt_list) > 0:
         x_scatter = all_gt
         y_scatter = all_pred
 
+    # Calculate dynamic ranges based on actual data
+    scatter_min = min(all_gt.min(), all_pred.min())
+    scatter_max = max(all_gt.max(), all_pred.max())
+    scatter_range_data = max(abs(scatter_min), abs(scatter_max))
+    scatter_range_padded = scatter_range_data * 1.1  # Add 10% padding
+
+    hist_range = (scatter_min, scatter_max)
+    err_min = all_diff.min()
+    err_max = all_diff.max()
+    err_range = (err_min * 1.1, err_max * 1.1)
+
+    print(f"[INFO] Dynamic Ranges Calculated:")
+    print(f"       Scatter Plot Range: [{-scatter_range_padded:.2f}, {scatter_range_padded:.2f}]")
+    print(f"       Histogram Range: [{hist_range[0]:.2f}, {hist_range[1]:.2f}]")
+    print(f"       Error Range: [{err_range[0]:.2f}, {err_range[1]:.2f}]")
+
     # Create scatter plot figure
     fig_scatter, ax_scatter = plt.subplots(figsize=(20, 20), dpi=150)
     ax_scatter.scatter(x_scatter, y_scatter, c='tab:blue', s=8, alpha=0.3)
-    ax_scatter.plot([-7.5, 7.5], [-7.5, 7.5], 'k--', lw=4)
+    ax_scatter.plot([-scatter_range_padded, scatter_range_padded], [-scatter_range_padded, scatter_range_padded], 'k--', lw=4)
     ax_scatter.set_xlabel("Ground Truth [m/s]", fontsize=56, fontweight='bold')
     ax_scatter.set_ylabel("Predicted [m/s]", fontsize=56, fontweight='bold')
     ax_scatter.set_title(f"Balanced Scatter Plot", fontsize=64, fontweight='bold', pad=40)
-    ax_scatter.set_xlim(-7.5, 7.5)
-    ax_scatter.set_ylim(-7.5, 7.5)
+    ax_scatter.set_xlim(-scatter_range_padded, scatter_range_padded)
+    ax_scatter.set_ylim(-scatter_range_padded, scatter_range_padded)
     ax_scatter.grid(True, alpha=0.3, linewidth=2)
     ax_scatter.tick_params(axis='both', which='major', labelsize=52)
     plt.tight_layout()
@@ -252,10 +277,9 @@ if len(scatter_gt_list) > 0:
     plt.close(fig_scatter)
     print(f"  Saved: scatter_plot.pdf")
 
-    # --- 2. MAE OVER TIME (Updated: With Variance/Std Shading) ---
+    # --- 2. MAE OVER TIME ---
     unique_times = np.unique(all_time)
     time_mae = []
-    time_std = []
     time_steps = []
 
     for t in sorted(unique_times):
@@ -266,28 +290,19 @@ if len(scatter_gt_list) > 0:
 
             # Mean of Absolute Errors
             mean_val = np.mean(abs_errors_t)
-            # Standard Deviation of Absolute Errors
-            std_val = np.std(abs_errors_t)
-
             time_mae.append(mean_val)
-            time_std.append(std_val)
             time_steps.append(t)
 
     time_mae = np.array(time_mae)
-    time_std = np.array(time_std)
     time_steps = np.array(time_steps)
 
     # Create MAE over time figure
     fig_time, ax_time = plt.subplots(figsize=(24, 12), dpi=150)
-    upper_err = time_std
-    lower_err = np.zeros_like(time_std)
-    ax_time.errorbar(time_steps, time_mae, yerr=[lower_err, upper_err],
-                     fmt='o-', color='darkblue', ecolor='red',
-                     elinewidth=4, capsize=8, markersize=12, linewidth=4,
-                     label='MAE with Std Dev (above) [m/s]')
+    ax_time.plot(time_steps, time_mae, 'o-', color='darkblue',
+                 markersize=12, linewidth=4, label='MAE [m/s]')
     ax_time.set_xlabel("Time Step", fontsize=56, fontweight='bold')
     ax_time.set_ylabel("MAE [m/s]", fontsize=56, fontweight='bold')
-    ax_time.set_ylim(-1.5, 1.5)
+    ax_time.set_ylim(0, 1)
     ax_time.set_title("Mean Absolute Error over Sequence Time", fontsize=64, fontweight='bold', pad=40)
     ax_time.grid(True, alpha=0.3, linewidth=2)
     ax_time.legend(fontsize=48, loc='best')
@@ -355,6 +370,155 @@ if len(scatter_gt_list) > 0:
     print(f"  Saved: histogram_error.pdf")
 
     print(f"[INFO] All individual PDFs saved to {output_dir}")
+
+    # --- 4. COMBINE ALL PDFS INTO ONE PNG GRID ---
+    print("[INFO] Converting PDFs to PNG and creating combined grid...")
+
+    pdf_files = [
+        scatter_path,
+        time_path,
+        gt_hist_path,
+        pred_hist_path,
+        err_hist_path
+    ]
+
+    # Check if all PDFs exist
+    existing_pdfs = [f for f in pdf_files if os.path.exists(f)]
+    print(f"  Found {len(existing_pdfs)} PDF files to convert")
+
+    # We'll recreate the plots as PNG and combine them
+    images = []
+
+    # A. Scatter Plot
+    fig_scatter, ax_scatter = plt.subplots(figsize=(12, 12), dpi=100)
+    ax_scatter.scatter(x_scatter, y_scatter, c='tab:blue', s=8, alpha=0.3)
+    ax_scatter.plot([-scatter_range_padded, scatter_range_padded], [-scatter_range_padded, scatter_range_padded], 'k--', lw=4)
+    ax_scatter.set_xlabel("Ground Truth [m/s]", fontsize=56, fontweight='bold')
+    ax_scatter.set_ylabel("Predicted [m/s]", fontsize=56, fontweight='bold')
+    ax_scatter.set_title(f"Balanced Scatter Plot", fontsize=64, fontweight='bold', pad=40)
+    ax_scatter.set_xlim(-scatter_range_padded, scatter_range_padded)
+    ax_scatter.set_ylim(-scatter_range_padded, scatter_range_padded)
+    ax_scatter.grid(True, alpha=0.3, linewidth=2)
+    ax_scatter.tick_params(axis='both', which='major', labelsize=52)
+    plt.tight_layout()
+    # Save to PNG buffer
+    img_scatter_path = os.path.join(output_dir, ".temp_scatter.png")
+    plt.savefig(img_scatter_path, dpi=100, format='png')
+    plt.close(fig_scatter)
+    images.append(Image.open(img_scatter_path))
+    print(f"    Converted: scatter_plot.pdf")
+
+    # B. MAE Over Time
+    fig_time, ax_time = plt.subplots(figsize=(16, 10), dpi=100)
+    ax_time.plot(time_steps, time_mae, 'o-', color='darkblue',
+                 markersize=12, linewidth=4, label='MAE [m/s]')
+    ax_time.set_xlabel("Time Step", fontsize=56, fontweight='bold')
+    ax_time.set_ylabel("MAE [m/s]", fontsize=56, fontweight='bold')
+    ax_time.set_ylim(0, 1)
+    ax_time.set_title("Mean Absolute Error over Sequence Time", fontsize=64, fontweight='bold', pad=40)
+    ax_time.grid(True, alpha=0.3, linewidth=2)
+    ax_time.legend(fontsize=48, loc='best')
+    ax_time.tick_params(axis='both', which='major', labelsize=52)
+    plt.tight_layout()
+    img_time_path = os.path.join(output_dir, ".temp_time.png")
+    plt.savefig(img_time_path, dpi=100, format='png')
+    plt.close(fig_time)
+    images.append(Image.open(img_time_path))
+    print(f"    Converted: mae_over_time.pdf")
+
+    # C. GT Histogram
+    fig_hist_gt, ax_hist_gt = plt.subplots(figsize=(12, 12), dpi=100)
+    ax_hist_gt.hist(all_gt, bins=HIST_BINS, range=hist_range, color='green', alpha=0.7, density=True, linewidth=2)
+    ax_hist_gt.set_title(f"Ground Truth Distribution\n$\mu={mu_gt:.2f}, \sigma={std_gt:.2f}$",
+                         fontsize=64, fontweight='bold', pad=40)
+    ax_hist_gt.set_xlabel("Velocity [m/s]", fontsize=56, fontweight='bold')
+    ax_hist_gt.set_ylabel("Density", fontsize=56, fontweight='bold')
+    ax_hist_gt.set_xlim(hist_range)
+    ax_hist_gt.grid(True, alpha=0.3, linewidth=2)
+    ax_hist_gt.tick_params(axis='both', which='major', labelsize=52)
+    plt.tight_layout()
+    img_gt_hist_path = os.path.join(output_dir, ".temp_hist_gt.png")
+    plt.savefig(img_gt_hist_path, dpi=100, format='png')
+    plt.close(fig_hist_gt)
+    images.append(Image.open(img_gt_hist_path))
+    print(f"    Converted: histogram_gt.pdf")
+
+    # D. Pred Histogram
+    fig_hist_pred, ax_hist_pred = plt.subplots(figsize=(12, 12), dpi=100)
+    ax_hist_pred.hist(all_pred, bins=HIST_BINS, range=hist_range, color='orange', alpha=0.7, density=True, linewidth=2)
+    ax_hist_pred.set_title(f"Prediction Distribution\n$\mu={mu_pred:.2f}, \sigma={std_pred:.2f}$",
+                           fontsize=64, fontweight='bold', pad=40)
+    ax_hist_pred.set_xlabel("Velocity [m/s]", fontsize=56, fontweight='bold')
+    ax_hist_pred.set_ylabel("Density", fontsize=56, fontweight='bold')
+    ax_hist_pred.set_xlim(hist_range)
+    ax_hist_pred.grid(True, alpha=0.3, linewidth=2)
+    ax_hist_pred.tick_params(axis='both', which='major', labelsize=52)
+    plt.tight_layout()
+    img_pred_hist_path = os.path.join(output_dir, ".temp_hist_pred.png")
+    plt.savefig(img_pred_hist_path, dpi=100, format='png')
+    plt.close(fig_hist_pred)
+    images.append(Image.open(img_pred_hist_path))
+    print(f"    Converted: histogram_pred.pdf")
+
+    # E. Error Histogram
+    fig_hist_err, ax_hist_err = plt.subplots(figsize=(12, 12), dpi=100)
+    ax_hist_err.hist(all_diff, bins=HIST_BINS, range=err_range, color='red', alpha=0.7, density=True, linewidth=2)
+    ax_hist_err.set_title(f"Error Distribution (Pred - GT)\n$\mu={mu_err:.2f}, \sigma={std_err:.2f}$",
+                          fontsize=64, fontweight='bold', pad=40)
+    ax_hist_err.set_xlabel("Error [m/s]", fontsize=56, fontweight='bold')
+    ax_hist_err.set_ylabel("Density", fontsize=56, fontweight='bold')
+    ax_hist_err.set_xlim(err_range)
+    ax_hist_err.grid(True, alpha=0.3, linewidth=2)
+    ax_hist_err.axvline(0, color='k', linestyle='--', lw=4)
+    ax_hist_err.tick_params(axis='both', which='major', labelsize=52)
+    plt.tight_layout()
+    img_err_hist_path = os.path.join(output_dir, ".temp_hist_err.png")
+    plt.savefig(img_err_hist_path, dpi=100, format='png')
+    plt.close(fig_hist_err)
+    images.append(Image.open(img_err_hist_path))
+    print(f"    Converted: histogram_error.pdf")
+
+    # --- 5. CREATE COMBINED GRID PNG ---
+    print("[INFO] Creating combined grid PNG...")
+
+    if len(images) == 5:
+        # Create a 3x2 grid layout (3 columns, 2 rows for 5 images)
+        cols = 3
+        rows = 2
+
+        # Resize images to same size for cleaner grid
+        target_width = 1200
+        target_height = 900
+        resized_images = []
+        for img in images:
+            img_resized = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+            resized_images.append(img_resized)
+
+        # Create combined grid
+        grid_width = cols * target_width
+        grid_height = rows * target_height
+        combined_img = Image.new('RGB', (grid_width, grid_height), color='white')
+
+        # Paste images into grid
+        for idx, img in enumerate(resized_images):
+            row = idx // cols
+            col = idx % cols
+            x = col * target_width
+            y = row * target_height
+            combined_img.paste(img, (x, y))
+
+        # Save combined image
+        combined_png_path = os.path.join(output_dir, "all_metrics_combined.png")
+        combined_img.save(combined_png_path, format='PNG', quality=95)
+        print(f"  [INFO] Combined PNG grid saved: {combined_png_path}")
+        print(f"  Grid size: {grid_width}x{grid_height} pixels")
+
+        # Clean up temp files
+        for temp_file in [img_scatter_path, img_time_path, img_gt_hist_path, img_pred_hist_path, img_err_hist_path]:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+    else:
+        print(f"  [WARNING] Expected 5 images, found {len(images)}. Skipping grid creation.")
 
 else:
     print("[WARNING] No valid pixels found to plot.")

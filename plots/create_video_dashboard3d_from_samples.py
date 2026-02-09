@@ -63,9 +63,10 @@ def create_3d_plot_img(sat_positions, look_at=[0, 0, 1500], figsize=(400, 400), 
         # Line to Cloud
         ax.plot([x_km, cx], [y_km, cy], [z_km, cz], c=color, linestyle='--', alpha=0.4, linewidth=1.5)
         
-        # Label
-        offset_z = (fixed_bounds[2] * 0.1) if fixed_bounds else 50
-        ax.text(x_km, y_km, z_km + offset_z, f"S{i}", color=color, fontsize=10, fontweight='bold', ha='center')
+        # Label (offset so it doesn't overlap the marker)
+        offset_z = (fixed_bounds[2] * 0.08) if fixed_bounds else 40
+        ax.text(x_km, y_km, z_km + offset_z, f"S{i}", color=color, fontsize=10,
+            fontweight='bold', ha='center', va='bottom')
 
     # Minimalist Axis Styling
     ax.set_xlabel('X (km)', fontsize=9, fontweight='bold', labelpad=5, color='#333333')
@@ -89,6 +90,63 @@ def create_3d_plot_img(sat_positions, look_at=[0, 0, 1500], figsize=(400, 400), 
         ax.set_zlim(0, mz) 
     
     plt.tight_layout()
+    fig.canvas.draw()
+    img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+    img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    plt.close(fig)
+    return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+
+def create_2d_plot_img(sat_positions, look_at=[0, 0, 1500], figsize=(400, 400), fixed_bounds=None, fill_axes=False):
+    """
+    Generates a 2D Y-Z side view scatter plot (Y horizontal, Z vertical).
+    """
+    w_in, h_in = figsize[0] / 100.0, figsize[1] / 100.0
+    fig, ax = plt.subplots(figsize=(w_in, h_in), dpi=100)
+
+    def to_km(val_m):
+        return val_m / 1000.0
+
+    # Cloud Center (Y-Z)
+    cy, cz = to_km(look_at[1]), to_km(look_at[2])
+    ax.scatter(cy, cz, c='#555555', s=180, marker='X', label='Cloud', zorder=3)
+
+    colors = ['#E74C3C', '#3498DB']
+    for i, pos in enumerate(sat_positions):
+        y_km = to_km(pos[1])
+        z_km = to_km(pos[2])
+        color = colors[i % len(colors)]
+        ax.scatter(y_km, z_km, c=color, s=100, edgecolors='white', linewidth=1.2, zorder=4)
+        ax.plot([y_km, cy], [z_km, cz], c=color, linestyle='--', alpha=0.4, linewidth=1.5, zorder=2)
+        ax.annotate(
+            f"S{i}",
+            xy=(y_km, z_km),
+            xytext=(0, 6),
+            textcoords='offset points',
+            ha='center', va='bottom',
+            color=color, fontsize=9, fontweight='bold'
+        )
+
+    ax.set_xlabel('Y (km)', fontsize=9, fontweight='bold', labelpad=8, color='#333333')
+    ax.set_ylabel('Z (km)', fontsize=9, fontweight='bold', labelpad=8, color='#333333')
+    ax.set_title('2D Geometry (Y-Z)', fontsize=12, fontweight='bold', color='#333333')
+    ax.grid(True, linestyle='--', alpha=0.3)
+
+    if fixed_bounds:
+        _, my, mz = fixed_bounds
+        ax.set_xlim(-my, my)
+        ax.set_ylim(0, mz)
+
+    if fill_axes:
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+        ax.set_title('')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
+    else:
+        fig.subplots_adjust(left=0.12, right=0.98, bottom=0.12, top=0.9)
+
     fig.canvas.draw()
     img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
     img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
@@ -152,7 +210,8 @@ def create_dashboard_3d_padded(
     sample_id="sample_000", 
     start_folder=2000,
     end_folder=2220,
-    fps=5
+    fps=5,
+    geo_mode="3d"
 ):
     # --- A. Load Metadata ---
     print("Loading Satellite Data...")
@@ -266,12 +325,19 @@ def create_dashboard_3d_padded(
             sat_positions = sat_lookup[target_time_val]
             plot_w = int(h_col * 0.8)
             
-            # --- CALLING 3D PLOT ---
-            img_geo = create_3d_plot_img(
-                sat_positions, 
-                figsize=(plot_w, h_col), 
-                fixed_bounds=fixed_limits_3d
-            )
+            # --- CALLING GEO PLOT ---
+            if geo_mode == "2d":
+                img_geo = create_2d_plot_img(
+                    sat_positions,
+                    figsize=(plot_w, h_col),
+                    fixed_bounds=fixed_limits_3d
+                )
+            else:
+                img_geo = create_3d_plot_img(
+                    sat_positions,
+                    figsize=(plot_w, h_col),
+                    fixed_bounds=fixed_limits_3d
+                )
             
             if img_geo.shape[0] != h_col:
                 img_geo = cv2.resize(img_geo, (img_geo.shape[1], h_col))
@@ -327,12 +393,12 @@ def create_dashboard_3d_padded(
 
 if __name__ == "__main__":
     # --- CONFIG ---
-    render_root = "/wdata_visl/danino/dataset_rendered_data/"
+    render_root = "/wdata_visl/danino/dataset_rendered_data_spp8192_g085/"
     velocity_root = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(vel_maps)/"
     csv_file = '/home/danino/PycharmProjects/pythonProject/data/Dor_2satellites_overpass.csv'
     
     output_video = "/home/danino/PycharmProjects/pythonProject/data/output/dashboard_3d.mp4"
-    target_sample = "sample_000"
+    target_sample = "sample_010"
     
     create_dashboard_3d_padded(
         render_root, 
@@ -340,7 +406,7 @@ if __name__ == "__main__":
         csv_file,
         output_video,
         sample_id=target_sample,
-        start_folder=8000,
-        end_folder=8300,
+        start_folder=2000,
+        end_folder=2600,
         fps=2
     )
