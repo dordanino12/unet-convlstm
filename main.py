@@ -219,7 +219,7 @@ if __name__ == "__main__":
     USE_MASK = False
     min_y = None  # 7.5987958908081055
     max_y = None  # 8.784920692443848
-    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_500m_slices_w.npz"
+    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_1000m_slices_w.npz"
     
     CUSTOM_CFG = {
         'base_ch': 64,
@@ -259,7 +259,7 @@ if __name__ == "__main__":
             lr=LR, 
             weight_decay=WEIGHT_DECAY
         )
-        model_name = "resnet18_frozen_2lstm_layers_500m_slice"
+        model_name = "resnet18_frozen_2lstm_layers_1000m_slice"
         
     else:
         print("[INFO] Initializing Custom Temporal U-Net...")

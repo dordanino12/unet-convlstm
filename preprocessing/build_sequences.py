@@ -9,8 +9,8 @@ from tqdm import tqdm
 # 1. CONFIGURATION
 # ---------------------------------------------------------
 root_images = '/wdata_visl/danino/dataset_rendered_data/'
-root_maps = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(vel_maps_slice_500m_nadir)/'
-output_path = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_500m_slices.npz"
+root_maps = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(vel_maps_slice_1000m_nadir)/'
+output_path = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_1000m_slices.npz"
 
 SEQ_LEN = 12  # Time 0 to 220 (12 frames)
 NUM_SAMPLES = 49  # Samples 000 to 048
@@ -30,7 +30,7 @@ def get_file_path(folder, sample_idx, view_idx=None, is_map=False):
     s_id_str = f"sample_{sample_idx:03d}"
 
     if is_map:
-        pattern = os.path.join(folder, f"{s_id_str}_*_view_0_slice_500m.pkl")
+        pattern = os.path.join(folder, f"{s_id_str}_*_view_0_slice_1000m.pkl")
     else:
         pattern = os.path.join(folder, f"{s_id_str}_*_view_{view_idx}.pkl")
 

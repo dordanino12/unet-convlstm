@@ -21,15 +21,15 @@ def main(start_folder_name=None, end_folder_name=None):
     # ==========================================
     # 1. CONFIGURATION
     # ==========================================
-    input_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)/'
+    input_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)_fixed/'
     output_root = '/wdata_visl/danino/dataset_rendered_data_spp8192_g085/' 
     csv_path = '/home/danino/PycharmProjects/pythonProject/data/Dor_2satellites_overpass.csv'
     
     SPP = 8192
     RES = 256
     G_VALUE = 0.85
-    start_folder_name = '0000005520'
-    end_folder_name = '0000009520'
+    start_folder_name = '0000005480'
+    end_folder_name = '0000010000'
     # ==========================================
     # 2. SETUP DATA & FOLDERS
     # ==========================================

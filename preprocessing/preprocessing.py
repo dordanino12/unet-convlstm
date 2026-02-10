@@ -178,7 +178,7 @@ if __name__ == "__main__":
     
     # Optional: Start from a specific folder (e.g., "0000015860")
     # Optional: End at a specific folder (inclusive, e.g., "0000017000")
-    start_from_folder = "0000015860"  # Change to specific folder number to resume from there
-    end_at_folder = "0000015880"                # Change to specific folder number to stop there (inclusive)
+    start_from_folder = "0000012240"  # Change to specific folder number to resume from there
+    end_at_folder = "0000013040"                # Change to specific folder number to stop there (inclusive)
 
     process_all_nc_files(input_directory, output_directory, start_from_folder, end_at_folder)

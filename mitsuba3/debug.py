@@ -28,8 +28,8 @@ overpass_indices = [15,1, 2, 33, 34, 35]
 renderer_params = {
     'overpass_csv': csv_file,
     'overpass_indices': overpass_indices,
-    'spp': 64,
-    'g_value': 0.7,
+    'spp': 512,
+    'g_value': 0.85,
     'cloud_width': 128,
     'voxel_res': 0.02,
     'scene_scale': 1000.0,
@@ -64,9 +64,9 @@ try:
 
     # Ball
     mask_sphere = ((x - (center_x - 40)) ** 2 + (y - center_y) ** 2 + (z - center_z) ** 2) <= 20 ** 2
-    synthetic_data_xyz[mask_sphere] = 0.1
+    synthetic_data_xyz[mask_sphere] = 0.02
     # Cube
-    synthetic_data_xyz[center_x - 15:center_x + 15, center_y - 15:center_y + 15, center_z - 15:center_z + 15] = 0.1
+    synthetic_data_xyz[center_x - 15:center_x + 15, center_y - 15:center_y + 15, center_z - 15:center_z + 15] = 0.2
     # Pyramid
     pyr_center_x = center_x + 40
     pyr_h = 40
@@ -75,7 +75,7 @@ try:
     L_h = 40 * (1.0 - h / pyr_h)
     mask_pyr = (z >= pyr_base_z) & (z < pyr_base_z + pyr_h) & (np.abs(x - pyr_center_x) <= L_h / 2) & (
             np.abs(y - center_y) <= L_h / 2)
-    synthetic_data_xyz[mask_pyr] = 0.1
+    synthetic_data_xyz[mask_pyr] = 0.02
 
     # --- ADD NEW BORDER FRAME ---
     border_density = 0.005
