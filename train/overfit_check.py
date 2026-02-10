@@ -26,9 +26,9 @@ print(f"Running on: {device}")
 USE_PRETRAINED = True  # Set True for ResNet18, False for Custom UNet
 # ------------------------------
 
-npz_path = os.path.join(parent_dir, "data/dataset_trajectory_sequences_samples.npz")
+npz_path = os.path.join(parent_dir, "data/dataset_trajectory_sequences_samples_W_top.npz")
 if not os.path.exists(npz_path):
-    npz_path = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples.npz"
+    npz_path = "/data/dataset_trajectory_sequences_samples_W_top.npz"
 
 # ---------------------------------------------------------
 # LOGIC

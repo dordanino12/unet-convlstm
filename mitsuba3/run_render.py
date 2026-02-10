@@ -2,33 +2,97 @@
 from render import MitsubaRenderer
 import numpy as np
 from PIL import Image
-import os  # <-- Added import
-import mitsuba as mi  # <-- Added import
+import os
+import mitsuba as mi
+import pickle
 
 # --- Imports for 3D Plotting ---
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import matplotlib as mpl
+import matplotlib.ticker as ticker
+
+# Global font settings MUST be set FIRST before creating any figures
+mpl.rcParams.update({
+    'font.size': 60,              # base font size (bigger)
+    'axes.titlesize': 64,         # axes title size
+    'axes.labelsize': 56,         # X/Y label size
+    'xtick.labelsize': 52,        # x tick labels
+    'ytick.labelsize': 52,        # y tick labels
+    'legend.fontsize': 52,        # legend if used
+    'figure.titlesize': 68,       # figure suptitle
+    'figure.dpi': 300,
+    'savefig.dpi': 150,
+    # PDF font embedding to preserve sizes
+    'pdf.fonttype': 42,           # embed TrueType fonts
+    'ps.fonttype': 42,
+    'svg.fonttype': 'none',
+})
+
+# --- Helper function for axes ---
+def set_centered_meter_axis(ax, height, width, m_per_pixel):
+    """
+    Set X and Y axes in meters with (0,0) at the center.
+    Fix axis limits to [-1280, 1280] meters.
+    Show intermediate ticks to avoid overlap.
+    Add tick lines connecting labels to the image.
+    """
+    # Fixed meter range
+    ax.set_xlim(-1280, 1280)
+    ax.set_ylim(1280, -1280)  # invert Y so top is positive in image coordinates
+
+    # Build ticks WITHOUT first and last values to prevent overlap
+    tick_vals = np.array([-1100, -640, 0, 640, 1100])
+    ax.set_xticks(tick_vals)
+    ax.set_yticks(tick_vals)
+    ax.set_xticklabels([f"{int(v)}" for v in tick_vals], fontsize=48, fontweight='bold')
+    ax.set_yticklabels([f"{int(v)}" for v in tick_vals], fontsize=48, fontweight='bold')
+
+    # Enable tick marks with custom styling
+    ax.tick_params(
+        axis='both',
+        which='major',
+        direction='out',  # ticks point outward from plot
+        length=14,        # length of tick lines
+        width=4,          # width of tick lines
+        color='black',    # color of tick lines
+        labelsize=48
+    )
+
+    ax.set_xlabel('X [m]', fontsize=52, fontweight='bold')
+    ax.set_ylabel('Y [m]', fontsize=52, fontweight='bold')
+
 
 # --- 1. Define Your Input Data Paths ---
 # You must have these files.
-csv_file = '/home/danino/PycharmProjects/pythonProject/data/Udi_3satellites_overpass.csv'
+csv_file = '/home/danino/PycharmProjects/pythonProject/data/Dor_2satellites_overpass.csv'
+#csv_file = '/home/danino/PycharmProjects/pythonProject/data/debug.csv'
 
-cloud_data_file = '/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_3D/BOMEX_512x512x200_20m_20m_1s_512_0000005300_5_2'  # This is the pkl file you have
+#cloud_data_file = '/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_3D/BOMEX_512x512x200_20m_20m_1s_512_0000005200_1_5'  # This is the pkl file you have
+#cloud_data_file= "/wdata_visl/danino/dataset_256x256x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000002000/sample_001.pkl"
+cloud_data_file= '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000005920/sample_012.pkl'
+#cloud_data_file= "/wdata_visl/danino/dataset_512x512x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000002000/sample_000.pkl"
+
 output_vol_file = 'temp/my_cloud.vol'  # A temporary file this script will create
-
+output_image_dir = '/home/danino/PycharmProjects/pythonProject/data/output'
 # Create temp directory if it doesn't exist
 os.makedirs('temp', exist_ok=True)
 
 # Define which rows from your CSV to use
-overpass_indices = [0, 1, 2, 9, 12, 15]
-#overpass_indices = [0, 3, 6, 9, 12, 15]
-#overpass_indices = [6, 7, 8, 9, 10, 11]
-#overpass_indices = [9, 10, 11, 15, 16, 17]
-#overpass_indices = [0, 1, 2, 30, 31, 32]
-#overpass_indices = [12,13,14, 15, 16, 17]
-#overpass_indices = [7, 8,9]
-#overpass_indices = [0, 1, 2]
+overpass_indices = [0, 1, 3, 5, 7, 9]
+overpass_indices = [11, 13, 15, 17, 19, 21]
+overpass_indices = [0, 1, 9, 17, 19, 21]
+overpass_indices = [9,10,11,12]
+
+
+# overpass_indices = [0, 3, 6, 9, 12, 15]
+# overpass_indices = [6, 7, 8, 9, 10, 11]
+# overpass_indices = [9, 10, 11, 15, 16, 17]
+# overpass_indices = [0, 1, 2, 30, 31, 32]
+# overpass_indices = [12,13,14, 15, 16, 17]
+# overpass_indices = [7, 8,9]
+# overpass_indices = [0, 1, 2]
 
 
 # --- 2. Set Up the Renderer Parameters ---
@@ -36,14 +100,16 @@ renderer_params = {
     'overpass_csv': csv_file,
     'overpass_indices': overpass_indices,
     'spp': 512,
-    'g_value': 0.7,
+    'g_value': 0,
     'cloud_width': 128,
+    'image_res': 256,
+    'fov' : 0.25,
     'voxel_res': 0.02,
     'scene_scale': 1000.0,
     'cloud_zrange': [0.0, 4.0],
-    'satellites': 3,
+    'satellites': 2,
     'timestamps': 2,
-    'pad_image': True,
+    'pad_image': False,
     'dynamic_emitter': True,
     'centralize_cloud': True,
     'bitmaps_required': False,
@@ -86,22 +152,77 @@ else:
     n_timestamps = renderer.timestamps
     n_satellites = renderer.satellites
 
-    # Handle the case where n_satellites is 1, so subplots isn't 2D
+    GAMMA_VAL = 0.5
+
+    # Determine resolution for axis scaling
+    image_res =renderer_params['image_res']
+    if image_res == 128:
+        m_per_pixel = 20
+    elif image_res == 256:
+        m_per_pixel = 10
+    else:
+        m_per_pixel = 20  # default fallback
+
+    # Loop through all results and save individual PDFs
+    print("Saving individual render PDFs...")
+    for t in range(n_timestamps):
+        for s in range(n_satellites):
+            # Get the raw image data
+            float_data = tensor_stacks[t][s]
+
+            # 1. Normalize to 0-1
+            if float_data.max() > 0:
+                normalized_data = float_data / float_data.max()
+            else:
+                normalized_data = float_data
+
+            # 2. Apply Gamma Correction
+            corrected_data = np.power(normalized_data, GAMMA_VAL)
+
+            # Get dimensions
+            H, W = corrected_data.shape
+
+            # Compute extent in meters so that (0,0) is centered
+            half_w_m = (W * m_per_pixel) / 2.0
+            half_h_m = (H * m_per_pixel) / 2.0
+            extent_m = [-half_w_m, half_w_m, half_h_m, -half_h_m]
+
+            # Create figure for individual PDF
+            fig_single, ax_single = plt.subplots(figsize=(12, 12), dpi=150)
+            im_single = ax_single.imshow(corrected_data, cmap='gray', extent=extent_m, interpolation='nearest')
+            ax_single.set_title('Render Cloud Image', fontsize=56, fontweight='bold', pad=40)
+            set_centered_meter_axis(ax_single, H, W, m_per_pixel)
+
+            # Add colorbar
+            cbar_single = plt.colorbar(im_single, ax=ax_single, fraction=0.046, pad=0.04)
+            cbar_single.ax.tick_params(labelsize=48)
+
+            # Save PDF
+            fig_single.set_size_inches(20, 20)
+            plt.subplots_adjust(left=0.17, right=0.92, top=0.95, bottom=0.08)
+            filename = f"render_t{t:02d}_s{s:02d}.pdf"
+            filepath = os.path.join(output_image_dir, filename)
+            plt.savefig(filepath, dpi=150)
+            plt.close(fig_single)
+            print(f"Saved: {filepath}")
+
+    # Create combined overview plot
+    print("Creating combined overview plot...")
     if n_timestamps == 1 and n_satellites == 1:
-        fig, axes = plt.subplots(1, 1, figsize=(n_satellites * 4, n_timestamps * 4))
+        fig, axes = plt.subplots(1, 1, figsize=(20, 20))
         axes = np.array([[axes]])  # Make it 2D for consistent indexing
     elif n_timestamps == 1:
-        fig, axes = plt.subplots(n_timestamps, n_satellites, figsize=(n_satellites * 4, n_timestamps * 4))
+        fig, axes = plt.subplots(n_timestamps, n_satellites, figsize=(n_satellites * 20, n_timestamps * 20))
         axes = np.array([axes])  # Make it 2D
     elif n_satellites == 1:
-        fig, axes = plt.subplots(n_timestamps, n_satellites, figsize=(n_satellites * 4, n_timestamps * 4))
+        fig, axes = plt.subplots(n_timestamps, n_satellites, figsize=(n_satellites * 20, n_timestamps * 20))
         axes = axes.reshape(-1, 1)  # Make it 2D
     else:
         fig, axes = plt.subplots(n_timestamps, n_satellites,
-                                 figsize=(n_satellites * 4, n_timestamps * 4),
+                                 figsize=(n_satellites * 20, n_timestamps * 20),
                                  squeeze=False)
 
-    fig.suptitle('All Rendered Satellite Images', fontsize=16)
+    fig.suptitle('All Rendered Satellite Images', fontsize=68, fontweight='bold')
 
     for t in range(n_timestamps):
         for s in range(n_satellites):
@@ -111,17 +232,59 @@ else:
             else:
                 normalized_data = float_data
 
-            image_data_uint8 = (normalized_data * 255).astype(np.uint8)
+            # Apply gamma correction
+            corrected_data = np.power(normalized_data, GAMMA_VAL)
+
+            # Get dimensions
+            H, W = corrected_data.shape
+            half_w_m = (W * m_per_pixel) / 2.0
+            half_h_m = (H * m_per_pixel) / 2.0
+            extent_m = [-half_w_m, half_w_m, half_h_m, -half_h_m]
 
             ax = axes[t, s]
-            ax.imshow(image_data_uint8, cmap='gray')
-            ax.set_title(f'Timestamp {t}, Satellite {s}')
-            ax.axis('off')
+            im = ax.imshow(corrected_data, cmap='gray', extent=extent_m, interpolation='nearest')
+            ax.set_title(f'Timestamp {t}, Satellite {s}', fontsize=56, fontweight='bold', pad=20)
+            set_centered_meter_axis(ax, H, W, m_per_pixel)
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    print("Displaying 2D render plot...")
-    #plt.show()  # Show the 2D plot window
+            # Add colorbar
+            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.ax.tick_params(labelsize=48)
 
+    plt.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.05, hspace=0.3, wspace=0.3)
+
+    # Save combined overview as PDF
+    overview_path = os.path.join(output_image_dir, "render_overview.pdf")
+    plt.savefig(overview_path, dpi=150)
+    print(f"Saved combined overview: {overview_path}")
+    plt.close(fig)
+
+# ==============================================================================
+# 8.5 NEW SECTION: LOAD AND SHOW TARGET IMAGE
+# ==============================================================================
+print(f"Loading 'target' image directly from {cloud_data_file}...")
+try:
+    cloud_data_file = cloud_data_file + '.pkl'
+    with open(cloud_data_file, 'rb') as f:
+        data_dict = pickle.load(f)
+
+    if 'target' in data_dict:
+        target_img = np.ma.getdata(data_dict['target'])
+
+        # Ensure dimensions are correct (remove singleton dims like 1x128x128 -> 128x128)
+        #target_img = np.squeeze(target_img)
+
+        plt.figure(figsize=(6, 6))
+        plt.imshow(target_img, cmap='gray')
+        plt.title(f"Target Image (Ground Truth)\nShape: {target_img.shape}")
+        plt.axis('off')
+        print("Target image loaded and ready to display.")
+    else:
+        print(f"Warning: 'target' key not found in the .pkl file. Available keys: {list(data_dict.keys())}")
+
+except Exception as e:
+    print(f"Error loading target image: {e}")
+
+# ==============================================================================
 first_tensor_data = tensor_stacks[0][0]
 print(f"Shape of the first tensor: {first_tensor_data.shape}")
 
@@ -174,6 +337,12 @@ def plot_scene_geometry(renderer, zoom_on_cloud=True):
     # --- Start 3D Plot ---
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
+
+    # Override global font settings for 3D plot (they're too large from PDF settings)
+    ax.xaxis.label.set_size(12)
+    ax.yaxis.label.set_size(12)
+    ax.zaxis.label.set_size(12)
+    ax.tick_params(axis='both', which='major', labelsize=10)
 
     # 1. Plot the Cloud Volume
     cloud_size = renderer.W  # e.g., 2.56 km
@@ -235,12 +404,12 @@ def plot_scene_geometry(renderer, zoom_on_cloud=True):
     # --- END OF FIX ---
 
     # 6. Set Labels and Title
-    ax.set_xlabel('X [km] (from CSV: sat_Wy)')
-    ax.set_ylabel('Y [km] (from CSV: sat_Wx)')
-    ax.set_zlabel('Z [km] (Altitude)')
+    ax.set_xlabel('X [km] (from CSV: sat_Wy)', fontsize=12)
+    ax.set_ylabel('Y [km] (from CSV: sat_Wx)', fontsize=12)
+    ax.set_zlabel('Z [km] (Altitude)', fontsize=12)
 
     if zoom_on_cloud:
-        ax.set_title('3D Scene Geometry (Zoomed on Cloud)')
+        ax.set_title('3D Scene Geometry (Zoomed on Cloud)', fontsize=14, fontweight='bold')
         # Set plot limits to zoom in on the origin/cloud
         # A slightly larger range than just the cloud to see context
         max_coord = max(cloud_size / 2, np.abs(cloud_center[2])) + 5  # Adjust 5 for padding
@@ -248,7 +417,7 @@ def plot_scene_geometry(renderer, zoom_on_cloud=True):
         ax.set_ylim([-max_coord, max_coord])
         ax.set_zlim([-max_coord, max_coord * 2])  # Z-axis might need more range for cloud altitude
     else:
-        ax.set_title('3D Scene Geometry (Global View)')
+        ax.set_title('3D Scene Geometry (Global View)', fontsize=14, fontweight='bold')
         # Automatically determine limits to fit everything
         all_x = np.concatenate(
             ([0, cloud_center[0]], cam_x, [sun_start_point[0]] if 'sun_start_point' in locals() else []))
@@ -270,7 +439,7 @@ def plot_scene_geometry(renderer, zoom_on_cloud=True):
         ax.set_ylim([y_min, y_max])
         ax.set_zlim([z_min, z_max])
 
-    ax.legend()
+    ax.legend(fontsize=10, loc='best')
 
     # Set equal aspect ratio if possible (can make plots look weird if ranges are very different)
     # ax.set_box_aspect([1,1,1]) # Newer matplotlib version

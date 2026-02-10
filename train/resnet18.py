@@ -25,7 +25,7 @@ class PretrainedTemporalUNet(nn.Module):
         # in_channels=2 -> The library automatically adapts the first layer!
         self.base_model = smp.Unet(
             encoder_name="resnet18",        
-            encoder_weights="imagenet",     
+            encoder_weights="imagenet",    
             in_channels=2,                  
             classes=out_channels,
             encoder_depth=5,
@@ -52,6 +52,26 @@ class PretrainedTemporalUNet(nn.Module):
             num_layers=lstm_layers,
             kernel_size=3
         )
+        # Add ConvLSTM modules for all encoder skip features (excluding bottleneck)
+        # Try to obtain encoder channel list from the encoder object; fall back
+        # to ResNet18 defaults if unavailable.
+        encoder_out_channels = None
+        if hasattr(self.encoder, 'out_channels'):
+            encoder_out_channels = getattr(self.encoder, 'out_channels')
+        elif hasattr(self.base_model, 'encoder_out_channels'):
+            encoder_out_channels = getattr(self.base_model, 'encoder_out_channels')
+
+        if encoder_out_channels is None:
+            # Typical ResNet18 encoder channels: [64, 64, 128, 256, 512]
+            encoder_out_channels = [64, 64, 128, 256, 512]
+
+        # Create a ConvLSTM module for each skip feature (all except last bottleneck)
+        skip_channels = encoder_out_channels[:-1]
+        self.skip_channels = list(skip_channels)
+        self.lstm_skips = nn.ModuleList([
+            ConvLSTM(input_dim=ch, hidden_dim=ch, num_layers=lstm_layers, kernel_size=3)
+            for ch in skip_channels
+        ])
 
     def forward(self, x_seq):
         # x_seq shape: [B, T, 1, H, W]
@@ -64,7 +84,10 @@ class PretrainedTemporalUNet(nn.Module):
         
         # The Encoder returns a list of features (Skip Connections)
         # features[0] -> High resolution ... features[-1] -> The Bottleneck
-        features = self.encoder(x_flat) 
+        features = self.encoder(x_flat)
+
+        # Note: do not enforce exact skip counts here; let mismatches raise
+        # natural errors during execution so failures are explicit in stack traces.
         
         # Extract the Bottleneck (the deepest feature)
         bottleneck = features[-1] # Shape: [B*T, 512, H/32, W/32]
@@ -90,6 +113,19 @@ class PretrainedTemporalUNet(nn.Module):
         # The Trick: Replace the last feature in the list (which was static) 
         # with the LSTM output (which is dynamic)
         features[-1] = lstm_out_flat
+
+        # --- OPTIONAL: temporal processing for selected skip connections ---
+        # Process all skip connections (features[0..-2]) with their ConvLSTMs
+        # Assumes `self.lstm_skips` was constructed with matching order and channels.
+        for i in range(len(self.lstm_skips)):
+            feat = features[i]
+            Ck = feat.shape[1]
+            hk, wk = feat.shape[2], feat.shape[3]
+            feat_seq = feat.view(B, T, Ck, hk, wk)
+            lstm_in = [feat_seq[:, t] for t in range(T)]
+            lstm_out_list, _ = self.lstm_skips[i](lstm_in)
+            lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
+            features[i] = lstm_out_stacked.view(B * T, Ck, hk, wk)
         
         # Decode
         decoder_out = self.decoder(*features)
