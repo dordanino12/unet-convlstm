@@ -217,12 +217,13 @@ class NPZSequenceDataset(Dataset):
         self.x_max = np.max(self.X)
         self.norm_const = max(self.x_max, 1.0)
 
-        # Symmetric MaxAbsScaler - Fixed scale factor
-        self.scale_factor = 10.0
 
         # Store raw statistics for reference
         self.min_vel = float(np.min(self.Y))
         self.max_vel = float(np.max(self.Y))
+
+        # Scale so that max_vel maps to 0.8 in normalized space
+        self.scale_factor = self.max_vel/0.8
 
         print(f"[INFO] Dataset Loaded. X Range: [0.0, {self.x_max:.2f}]")
         print(f"[INFO] Y Normalization (Symmetric MaxAbsScaler): scale_factor={self.scale_factor}")

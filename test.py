@@ -16,7 +16,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 # Import model classes
-from train.unet import TemporalUNetDualView, NPZSequenceDataset
+from train.dataset import NPZSequenceDataset
 from train.resnet18 import PretrainedTemporalUNet
 # 3D/2D dashboard helpers
 from plots.create_video_dashboard3d_from_samples import create_3d_plot_img, create_2d_plot_img, load_camera_csv
@@ -25,7 +25,7 @@ from plots.create_video_dashboard3d_from_samples import create_3d_plot_img, crea
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK = False
+USE_MASK =  "slice_mask"  # True, False, or "slice_mask"
 SHOW_MASK_IMG = True
 GEO_MODE = "2d"  # "3d" or "2d" (X-Z view)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -42,8 +42,8 @@ focus_thresh = 2.0
 # NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top.npz"
 # CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
 NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_500m_w.npz"
-CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_500m_best_skip.pt"
-SEQUENCE_IDX = 1000
+CHECKPOINT_PATH = "models/resnet18_trainable_2lstm_layers_500m_best_skip.pt"
+SEQUENCE_IDX = 1700
 CSV_PATH = "data/Dor_2satellites_overpass.csv"
 VIDEO_FPS = 1
 SAVE_PDF_SECTIONS = True
@@ -72,25 +72,13 @@ print(f"[INFO] Loading checkpoint: {CHECKPOINT_PATH}")
 checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
 
 cfg = checkpoint.get('config', {})
-model_type = cfg.get('type', 'custom')
 
-print(f"[INFO] Detected Model Type: {model_type}")
-
-if model_type == 'resnet18':
-    model = PretrainedTemporalUNet(
-        out_channels=1,
-        lstm_layers=2,
-        freeze_encoder=cfg.get('freeze_encoder', True)
-    )
-else:
-    model = TemporalUNetDualView(
-        in_channels_per_sat=1,
-        out_channels=1,
-        base_ch=cfg.get('base_ch', 64),
-        lstm_layers=1,
-        use_skip_lstm=cfg.get('use_skip_lstm', True),
-        use_attention=cfg.get('use_attention', False)
-    )
+print(f"[INFO] Loading ResNet18 Model...")
+model = PretrainedTemporalUNet(
+    out_channels=1,
+    lstm_layers=2,
+    freeze_encoder=cfg.get('freeze_encoder', True)
+)
 
 model.load_state_dict(checkpoint['model_state'])
 model.to(DEVICE)
@@ -108,8 +96,8 @@ gt_vel_denorm = dataset.denormalize(gt_vel_seq)
 
 # --- Fixed plot range so color scale doesn't jump per-frame ---
 # Use dataset min/max (or set symmetric range if you prefer)
-vmin_fixed = dataset.min_vel
-vmax_fixed = dataset.max_vel
+vmin_fixed = -dataset.max_neg_val
+vmax_fixed = dataset.max_pos_val
 
 # --- Non-linear color normalization to emphasize -3..3 while keeping full range ---
 # Use SymLogNorm with a linear threshold around `focus_thresh` (e.g., 3 m/s)
@@ -158,7 +146,6 @@ seq_rmse = []
 seq_mean_err = []
 
 
-# --- Gamma Helper Function ---
 def apply_gamma(img_array, gamma=0.5):
     img_min, img_max = img_array.min(), img_array.max()
     if img_max - img_min < 1e-6:
@@ -166,6 +153,70 @@ def apply_gamma(img_array, gamma=0.5):
     img_norm = (img_array - img_min) / (img_max - img_min)
     img_corrected = np.power(img_norm, gamma)
     return img_corrected
+
+
+def get_mask_for_display(mask_seq, t_len, use_mask_mode):
+    """
+    Extract the appropriate mask for display based on mask mode.
+
+    Args:
+        mask_seq: Full mask sequence (T, 1, H, W)
+        t_len: Current time length
+        use_mask_mode: True, False, or "slice_mask"
+
+    Returns:
+        mask_frame: The mask to display (H, W) or all zeros if use_mask is False
+        mask_label: String describing the mask type
+    """
+    last_idx = t_len - 1
+
+    if use_mask_mode == "slice_mask":
+        # Extract mask from time step 5, broadcast to all frames
+        if mask_seq.shape[0] > 5:
+            mask_slice_5 = mask_seq[5, 0].cpu().numpy()  # Get frame 5's mask
+            mask_frame = mask_slice_5
+            mask_label = "Mask (from T=5)"
+        else:
+            # Fallback if sequence too short
+            mask_frame = np.zeros((mask_seq.shape[2], mask_seq.shape[3]))
+            mask_label = "Mask (T<6, unavailable)"
+    elif use_mask_mode is True:
+        # Binary mask: show current frame's mask
+        mask_frame = mask_seq[last_idx, 0].cpu().numpy()
+        mask_label = "Cloud Mask"
+    else:  # use_mask_mode is False
+        # No mask: show zeros
+        mask_frame = np.zeros((mask_seq.shape[2], mask_seq.shape[3]))
+        mask_label = "No Mask"
+
+    return mask_frame, mask_label
+
+
+def get_mask_for_metrics(mask_seq, t_len, use_mask_mode):
+    """
+    Extract the appropriate mask for metrics calculation.
+    Metrics always use frame-specific masks (not broadcasted).
+
+    Args:
+        mask_seq: Full mask sequence (T, 1, H, W)
+        t_len: Current time length
+        use_mask_mode: True, False, or "slice_mask"
+
+    Returns:
+        mask_frame: The mask to use for metrics (H, W)
+    """
+    last_idx = t_len - 1
+
+    if use_mask_mode is True:
+        # Binary mask: use current frame's mask
+        return mask_seq[last_idx, 0].cpu().numpy()
+    elif use_mask_mode == "slice_mask":
+        # For metrics in slice_mask mode: still use current frame's original mask
+        # (metrics should show frame-specific performance)
+        return mask_seq[last_idx, 0].cpu().numpy()
+    else:  # use_mask_mode is False
+        # No mask for metrics
+        return np.ones((mask_seq.shape[2], mask_seq.shape[3]))  # All ones = all valid
 
 
 def set_centered_meter_axis(ax, height, width, m_per_pixel=20):
@@ -328,18 +379,25 @@ for t_len in range(1, T + 1):
 
     gt_frame = gt_vel_denorm[last_idx, 0].cpu().numpy()
     pred_frame = pred_vel_denorm[last_idx, 0]
-    mask_frame = mask_seq[last_idx, 0].cpu().numpy()
+
+    # Get mask for display (handles "slice_mask" mode)
+    mask_frame, mask_label = get_mask_for_display(mask_seq, t_len, USE_MASK)
+
+    # Get mask for metrics (frame-specific, not broadcasted)
+    mask_frame_metrics = get_mask_for_metrics(mask_seq, t_len, USE_MASK)
 
     # --- Metrics Calculation ---
     diff_map = pred_frame - gt_frame
 
-    if USE_MASK:
-        valid_pixels = mask_frame > 0.1
+    if USE_MASK is True:
+        # Binary mask mode: metrics only on masked regions
+        valid_pixels = mask_frame_metrics > 0.1
         if np.any(valid_pixels):
             valid_diff = diff_map[valid_pixels]
         else:
             valid_diff = np.array([0.0])
     else:
+        # No mask or slice_mask: metrics on all pixels
         valid_diff = diff_map.flatten()
 
     mae_score = np.mean(np.abs(valid_diff))
@@ -351,13 +409,15 @@ for t_len in range(1, T + 1):
     seq_mean_err.append(mean_err_score)
 
     # --- Plotting Preparation ---
-    if USE_MASK:
+    if USE_MASK is True:
+        # Binary mask mode: mask invalid pixels for display
         mask_invalid = mask_frame <= 0.1
         gt_display = np.ma.masked_where(mask_invalid, gt_frame)
         pred_display = np.ma.masked_where(mask_invalid, pred_frame)
         cmap_vel = cmap_custom.copy()
         cmap_vel.set_bad(color='black')
     else:
+        # No mask or slice_mask: show full velocity images without masking
         gt_display = gt_frame
         pred_display = pred_frame
         cmap_vel = cmap_custom
@@ -495,11 +555,11 @@ for t_len in range(1, T + 1):
     if SHOW_MASK_IMG:
         if have_geo:
             axes[1, 2].imshow(mask_frame, cmap='gray', vmin=0, vmax=1)
-            axes[1, 2].set_title("Cloud Mask", pad=8)
+            axes[1, 2].set_title(mask_label, pad=8)
             axes[1, 2].axis('off')
         else:
             axes[1, 2].imshow(mask_frame, cmap='gray', vmin=0, vmax=1)
-            axes[1, 2].set_title("Cloud Mask", pad=8)
+            axes[1, 2].set_title(mask_label, pad=8)
             axes[1, 2].axis('off')
 
     plt.tight_layout()

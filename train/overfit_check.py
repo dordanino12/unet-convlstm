@@ -12,7 +12,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 # Import both model classes
-from train.unet import NPZSequenceDataset, TemporalUNetDualView
+from train.dataset import NPZSequenceDataset
 from train.resnet18 import PretrainedTemporalUNet
 
 # ---------------------------------------------------------
@@ -22,9 +22,9 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Running on: {device}")
 
-# --- TOGGLE MODEL TYPE HERE ---
-USE_PRETRAINED = True  # Set True for ResNet18, False for Custom UNet
-# ------------------------------
+# --- CONFIGURATION ---
+FREEZE_ENCODER = True  # True: Freeze encoder (faster), False: Train encoder (slower, more capacity)
+# ---------------------
 
 npz_path = os.path.join(parent_dir, "data/dataset_trajectory_sequences_samples_W_top.npz")
 if not os.path.exists(npz_path):
@@ -53,37 +53,24 @@ def run_overfit_test_and_save():
 
     print(f"Batch Shapes -> X: {x.shape}, Y: {y.shape}")
 
-    # 3. Initialize Model based on Flag
-    if USE_PRETRAINED:
-        print("[INFO] Initializing Pre-trained ResNet18 Model...")
-        model = PretrainedTemporalUNet(
-            out_channels=1, 
-            lstm_layers=1, 
-            freeze_encoder=True 
-        ).to(device)
-        
-        # Optimize only trainable parameters
-        optimizer = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()), 
-            lr=1e-3, weight_decay=1e-4
-        )
-        model_type_str = 'resnet18'
-        save_cfg = {'type': 'resnet18', 'freeze_encoder': True, 'lstm_layers': 1}
+    # 3. Initialize Model
+    print("[INFO] Initializing Pre-trained ResNet18 Model...")
+    encoder_state = "frozen" if FREEZE_ENCODER else "trainable"
+    print(f"[INFO] Encoder is {'FROZEN' if FREEZE_ENCODER else 'TRAINABLE'}")
 
-    else:
-        print("[INFO] Initializing Custom Temporal U-Net...")
-        model = TemporalUNetDualView(
-            in_channels_per_sat=1,
-            out_channels=1,
-            base_ch=64,
-            lstm_layers=1,
-            use_skip_lstm=True,
-            use_attention=False
-        ).to(device)
-        
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-        model_type_str = 'custom'
-        save_cfg = {'type': 'custom', 'base_ch': 64, 'use_skip_lstm': True, 'use_attention': False}
+    model = PretrainedTemporalUNet(
+        out_channels=1,
+        lstm_layers=1,
+        freeze_encoder=FREEZE_ENCODER
+    ).to(device)
+
+    # Optimize only trainable parameters
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=1e-3, weight_decay=1e-4
+    )
+    model_type_str = f'resnet18_{encoder_state}'
+    save_cfg = {'type': 'resnet18', 'freeze_encoder': FREEZE_ENCODER, 'lstm_layers': 1}
 
     print(f"\n--- Starting Overfit Test ({model_type_str}) ---")
     

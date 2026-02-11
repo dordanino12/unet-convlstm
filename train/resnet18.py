@@ -11,7 +11,57 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
-from train.unet import TemporalUNetDualView, NPZSequenceDataset, ConvLSTM
+
+# -----------------------------------------------------
+# ConvLSTM building blocks
+# -----------------------------------------------------
+class ConvLSTMCell(nn.Module):
+    def __init__(self, input_dim, hidden_dim, kernel_size=3, bias=True):
+        super().__init__()
+        padding = kernel_size // 2
+        self.hidden_dim = hidden_dim
+        self.conv = nn.Conv2d(input_dim + hidden_dim, 4 * hidden_dim, kernel_size, padding=padding, bias=bias)
+
+    def forward(self, x, state=None):
+        B, C, H, W = x.shape
+        if state is None:
+            h = x.new_zeros(B, self.hidden_dim, H, W)
+            c = x.new_zeros(B, self.hidden_dim, H, W)
+        else:
+            h, c = state
+        gates = self.conv(torch.cat([x, h], dim=1))
+        i, f, g, o = torch.chunk(gates, 4, dim=1)
+        i = torch.sigmoid(i)
+        f = torch.sigmoid(f)
+        g = torch.tanh(g)
+        o = torch.sigmoid(o)
+        c_next = f * c + i * g
+        h_next = o * torch.tanh(c_next)
+        return h_next, (h_next, c_next)
+
+
+class ConvLSTM(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers=1, kernel_size=3):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        for l in range(num_layers):
+            self.layers.append(ConvLSTMCell(input_dim if l == 0 else hidden_dim, hidden_dim, kernel_size))
+
+    def forward(self, x_seq, state=None):
+        T = len(x_seq)
+        if state is None:
+            state = [None] * len(self.layers)
+        out = x_seq
+        new_states = []
+        for li, layer in enumerate(self.layers):
+            h, c = (None, None) if state[li] is None else state[li]
+            seq_out = []
+            for t in range(T):
+                h, (h, c) = layer(out[t], None if h is None else (h, c))
+                seq_out.append(h)
+            out = seq_out
+            new_states.append((h, c))
+        return out, new_states
 
 # -----------------------------------------------------
 # New Model: ResNet18 Encoder + Temporal Bottleneck

@@ -262,7 +262,7 @@ if __name__ == "__main__":
     # --- CONFIGURATION ---
     # Choose mode: 'first_hit' (Cloud Surface) or 'slice' (Specific Height)
     render_mode = 'slice'
-    slice_height_m = 500.0  # Height in meters to slice (e.g., middle of cloud)
+    slice_height_m = 1000.0  # Height in meters to slice (e.g., middle of cloud)
 
     print(f"Cam: {camera_pos}, Mode: {render_mode}")
 

@@ -32,7 +32,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 # Import model classes
-from train.unet import TemporalUNetDualView, NPZSequenceDataset
+from train.dataset import NPZSequenceDataset
 from train.resnet18 import PretrainedTemporalUNet
 
 # -----------------------------
@@ -43,17 +43,15 @@ USE_MASK = False
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Paths
-#NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
-#CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_envelop_test_split_best_skip.pt"
 NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_500m_w.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_500m_best_skip.pt"
+CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_trainable_2lstm_layers_500m_best_skip.pt"
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
 SCATTER_BIN_WIDTH = 0.05  # Width of each velocity bin (e.g., 0.5 m/s)
-POINTS_PER_BIN = 500  # How many points to sample from each bin (The "X" you requested)
+POINTS_PER_BIN = 250  # How many points to sample from each bin (The "X" you requested)
 SCATTER_RANGE = (-8.0, 8.0)  # Range to define bins over
 
 HIST_BINS = 100  # Number of bins for histograms
@@ -64,28 +62,16 @@ max_y = None  # 8.784920692443848
 # 2. Load Model Logic
 # -----------------------------
 print(f"[INFO] Loading checkpoint: {CHECKPOINT_PATH}")
-checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
 
 cfg = checkpoint.get('config', {})
-model_type = cfg.get('type', 'custom')
 
-print(f"[INFO] Detected Model Type: {model_type}")
-
-if model_type == 'resnet18':
-    model = PretrainedTemporalUNet(
-        out_channels=1,
-        lstm_layers=2,
-        freeze_encoder=cfg.get('freeze_encoder', True)
-    )
-else:
-    model = TemporalUNetDualView(
-        in_channels_per_sat=1,
-        out_channels=1,
-        base_ch=cfg.get('base_ch', 64),
-        lstm_layers=1,
-        use_skip_lstm=cfg.get('use_skip_lstm', True),
-        use_attention=cfg.get('use_attention', False)
-    )
+print(f"[INFO] Loading ResNet18 Model...")
+model = PretrainedTemporalUNet(
+    out_channels=1,
+    lstm_layers=2,
+    freeze_encoder=cfg.get('freeze_encoder', True)
+)
 
 model.load_state_dict(checkpoint['model_state'])
 model.to(DEVICE)
@@ -201,58 +187,49 @@ if len(scatter_gt_list) > 0:
     print(f"Global Error Std:  {global_std_err:.4f} m/s")
     print("=" * 40)
 
+    def sample_scatter_points(gt_vals, pred_vals, label_suffix):
+        # Balanced sampling for scatter plot
+        bins = np.arange(SCATTER_RANGE[0], SCATTER_RANGE[1] + SCATTER_BIN_WIDTH, SCATTER_BIN_WIDTH)
+        bin_indices = np.digitize(gt_vals, bins)
+        selected_indices = []
+        unique_bins = np.unique(bin_indices)
+
+        for b_idx in unique_bins:
+            points_in_bin = np.where(bin_indices == b_idx)[0]
+            n_sample = min(len(points_in_bin), POINTS_PER_BIN)
+            if n_sample > 0:
+                chosen = np.random.choice(points_in_bin, size=n_sample, replace=False)
+                selected_indices.append(chosen)
+
+        if len(selected_indices) > 0:
+            final_indices = np.concatenate(selected_indices)
+            np.random.shuffle(final_indices)
+            x_scatter = gt_vals[final_indices]
+            y_scatter = pred_vals[final_indices]
+            print(f"[INFO] Selected {len(x_scatter)} points total for balanced scatter plot{label_suffix}.")
+        else:
+            print(f"[WARNING] Sampling failed{label_suffix}, using all points.")
+            x_scatter = gt_vals
+            y_scatter = pred_vals
+
+        scatter_min = min(gt_vals.min(), pred_vals.min())
+        scatter_max = max(gt_vals.max(), pred_vals.max())
+        scatter_range_data = max(abs(scatter_min), abs(scatter_max))
+        scatter_range_padded = scatter_range_data * 1.1
+        return x_scatter, y_scatter, scatter_min, scatter_max, scatter_range_padded
+
     # -----------------------------
     # 5. Generate Individual PDF Plots
     # -----------------------------
     print("[INFO] Generating Individual PDF Plots...")
 
-    # --- 1. SCATTER PLOT (Updated: Balanced/Stratified Sampling) ---
-    print(f"[INFO] Performing Balanced Sampling for Scatter Plot...")
+    # --- 1. SCATTER PLOT (All Time Steps) ---
+    print(f"[INFO] Performing Balanced Sampling for Scatter Plot (all time steps)...")
     print(f"       Bins Width: {SCATTER_BIN_WIDTH}, Points per Bin: {POINTS_PER_BIN}")
 
-    # Create bins for the Ground Truth values
-    bins = np.arange(SCATTER_RANGE[0], SCATTER_RANGE[1] + SCATTER_BIN_WIDTH, SCATTER_BIN_WIDTH)
-
-    # Assign each GT value to a bin index
-    # np.digitize returns indices starting from 1
-    bin_indices = np.digitize(all_gt, bins)
-
-    selected_indices = []
-
-    # Iterate over each bin (1 to len(bins))
-    unique_bins = np.unique(bin_indices)
-
-    for b_idx in unique_bins:
-        # Find all data points falling into this bin
-        points_in_bin = np.where(bin_indices == b_idx)[0]
-
-        # Determine how many to sample (min of available points or target limit)
-        n_sample = min(len(points_in_bin), POINTS_PER_BIN)
-
-        if n_sample > 0:
-            # Randomly select indices
-            chosen = np.random.choice(points_in_bin, size=n_sample, replace=False)
-            selected_indices.append(chosen)
-
-    if len(selected_indices) > 0:
-        final_indices = np.concatenate(selected_indices)
-        # Shuffle them so they don't plot in order of bins (visual aesthetics)
-        np.random.shuffle(final_indices)
-
-        x_scatter = all_gt[final_indices]
-        y_scatter = all_pred[final_indices]
-        print(f"[INFO] Selected {len(x_scatter)} points total for balanced scatter plot.")
-    else:
-        # Fallback if something fails
-        print("[WARNING] Sampling failed, using all points.")
-        x_scatter = all_gt
-        y_scatter = all_pred
-
-    # Calculate dynamic ranges based on actual data
-    scatter_min = min(all_gt.min(), all_pred.min())
-    scatter_max = max(all_gt.max(), all_pred.max())
-    scatter_range_data = max(abs(scatter_min), abs(scatter_max))
-    scatter_range_padded = scatter_range_data * 1.1  # Add 10% padding
+    x_scatter, y_scatter, scatter_min, scatter_max, scatter_range_padded = sample_scatter_points(
+        all_gt, all_pred, " (all time steps)"
+    )
 
     hist_range = (scatter_min, scatter_max)
     err_min = all_diff.min()
@@ -280,6 +257,35 @@ if len(scatter_gt_list) > 0:
     plt.savefig(scatter_path, dpi=150)
     plt.close(fig_scatter)
     print(f"  Saved: scatter_plot.pdf")
+
+    # --- 2. SCATTER PLOT (Time Step 5 Only) ---
+    time5_mask = (all_time == 5)
+    if np.any(time5_mask):
+        scatter_gt_t5 = all_gt[time5_mask]
+        scatter_pred_t5 = all_pred[time5_mask]
+        print(f"[INFO] Performing Balanced Sampling for Scatter Plot (time step 5 only)...")
+
+        x_scatter_t5, y_scatter_t5, scatter_min_t5, scatter_max_t5, scatter_range_padded_t5 = sample_scatter_points(
+            scatter_gt_t5, scatter_pred_t5, " (time step 5)"
+        )
+
+        fig_scatter_t5, ax_scatter_t5 = plt.subplots(figsize=(20, 20), dpi=150)
+        ax_scatter_t5.scatter(x_scatter_t5, y_scatter_t5, c='tab:blue', s=8, alpha=0.3)
+        ax_scatter_t5.plot([-scatter_range_padded_t5, scatter_range_padded_t5], [-scatter_range_padded_t5, scatter_range_padded_t5], 'k--', lw=4)
+        ax_scatter_t5.set_xlabel("Ground Truth [m/s]", fontsize=56, fontweight='bold')
+        ax_scatter_t5.set_ylabel("Predicted [m/s]", fontsize=56, fontweight='bold')
+        ax_scatter_t5.set_title(f"Balanced Scatter Plot (Time Step 5)", fontsize=64, fontweight='bold', pad=40)
+        ax_scatter_t5.set_xlim(-scatter_range_padded_t5, scatter_range_padded_t5)
+        ax_scatter_t5.set_ylim(-scatter_range_padded_t5, scatter_range_padded_t5)
+        ax_scatter_t5.grid(True, alpha=0.3, linewidth=2)
+        ax_scatter_t5.tick_params(axis='both', which='major', labelsize=52)
+        plt.tight_layout()
+        scatter_path_t5 = os.path.join(output_dir, "scatter_plot_t5.pdf")
+        plt.savefig(scatter_path_t5, dpi=150)
+        plt.close(fig_scatter_t5)
+        print(f"  Saved: scatter_plot_t5.pdf")
+    else:
+        print("[WARNING] No samples found for time step 5. Skipping time-step-5 scatter plot.")
 
     # --- 2. MAE OVER TIME ---
     unique_times = np.unique(all_time)
