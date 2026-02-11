@@ -43,17 +43,17 @@ USE_MASK = False
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Paths
-#NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top.npz"
-#CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
-NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_1000m_slices_w.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_1000m_slice_best_skip.pt"
+#NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
+#CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_envelop_test_split_best_skip.pt"
+NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_500m_w.npz"
+CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_500m_best_skip.pt"
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
 SCATTER_BIN_WIDTH = 0.05  # Width of each velocity bin (e.g., 0.5 m/s)
-POINTS_PER_BIN = 1000  # How many points to sample from each bin (The "X" you requested)
+POINTS_PER_BIN = 500  # How many points to sample from each bin (The "X" you requested)
 SCATTER_RANGE = (-8.0, 8.0)  # Range to define bins over
 
 HIST_BINS = 100  # Number of bins for histograms
@@ -94,18 +94,22 @@ model.eval()
 # -----------------------------
 # 3. Process Validation Dataset Only
 # -----------------------------
-full_dataset = NPZSequenceDataset(NPZ_PATH, min_y=min_y, max_y=max_y)
+full_dataset = NPZSequenceDataset(NPZ_PATH)
 
 
-# Re-create the split exactly as in training
-n_train = int(0.8 * len(full_dataset))
-n_val = len(full_dataset) - n_train
+# Re-create the split exactly as in training (70% train, 15% val, 15% test)
+n_total = len(full_dataset)
+n_train = int(0.7 * n_total)
+n_val = int(0.15 * n_total)
+n_test = n_total - n_train - n_val
 
-# Use the same seed generator
+# Use the same seed generator as in training
 generator = torch.Generator().manual_seed(42)
-train_ds, val_ds = torch.utils.data.random_split(full_dataset, [n_train, n_val], generator=generator)
+train_ds, val_ds, test_ds = torch.utils.data.random_split(full_dataset, [n_train, n_val, n_test], generator=generator)
 
-print(f"[INFO] Dataset loaded. Evaluating on VALIDATION set only ({len(val_ds)} sequences)")
+# Evaluate on TEST set
+eval_ds = test_ds
+print(f"[INFO] Dataset loaded. Evaluating on TEST set only ({len(eval_ds)} sequences)")
 
 # Lists to store pixel values
 scatter_gt_list = []
@@ -114,10 +118,10 @@ scatter_time_list = []
 
 print("[INFO] Starting evaluation...")
 
-for i in tqdm(range(len(val_ds)), desc="Evaluating"):
+for i in tqdm(range(len(eval_ds)), desc="Evaluating"):
 
-    # Get item from Validation Dataset
-    input_seq, gt_vel_seq, mask_seq = val_ds[i]
+    # Get item from Test Dataset
+    input_seq, gt_vel_seq, mask_seq = eval_ds[i]
 
     x_input = input_seq.unsqueeze(0).to(DEVICE)
 

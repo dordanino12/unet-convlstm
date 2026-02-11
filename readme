@@ -1,6 +1,6 @@
 new server : 132.28.58.142
 
-nohup python -u my_script.py > output.log 2>&1 &
+nohup python -u my_script.py > output_train.log 2>&1 &
 
 (The -u flag forces unbuffered output so logs appear immediately)
 

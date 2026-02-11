@@ -9,6 +9,7 @@ Supports two architectures:
 
 from __future__ import annotations
 import os
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,24 +26,23 @@ from train.resnet18 import PretrainedTemporalUNet
 # -----------------------------------------------------
 # Loss Function: Weighted L1 + Gradient Loss
 # -----------------------------------------------------
-def compute_loss(y_pred, y, mask=None, use_mask=True):
+def compute_loss(y_pred, y, mask=None, use_mask=True, dataset_obj=None):
     """
     Computes weighted L1 loss and spatial gradient loss.
-    - Penalizes high-velocity errors more heavily.
+    - Uses LINEAR weighting based on normalized velocity magnitude.
+    - Normalizes by sum of weights to prevent gradient explosion.
     - Ensures numerical stability with epsilon.
     """
-    # 1. Weighted L1
     abs_diff = (y_pred - y).abs()
 
-    # Weight scales linearly with velocity (Cubic increase)
-    weight = 1.0 + 4.0 * (y.abs() ** 3)
+    weight = torch.exp(7.0 * y.abs())
 
     if use_mask and mask is not None:
         numerator = (abs_diff * mask * weight).sum()
-        denominator = (mask * weight).sum() + 1e-8
+        denominator = (mask * weight).sum() + 1e-8  # Normalize by weight sum
         weighted_l1 = numerator / denominator
     else:
-        weighted_l1 = (abs_diff * weight).mean()
+        weighted_l1 = (abs_diff * weight).sum() / (weight.sum() + 1e-8)
 
     # 2. Gradient Loss (Spatial smoothness and edge preservation)
     def spatial_gradients(tensor):
@@ -84,7 +84,7 @@ def train_one_epoch(model, loader, optimizer, device, dataset_obj, use_mask=True
     all_err = []
 
     #for x, y, mask in loader: #tqdm(loader, desc="Training", leave=False):
-    for x, y, mask in tqdm(loader, desc="Training", leave=False):
+    for x, y, mask in loader:
 
         x, y, mask = x.to(device), y.to(device), mask.to(device)
         
@@ -99,7 +99,7 @@ def train_one_epoch(model, loader, optimizer, device, dataset_obj, use_mask=True
         else:
             y_pred = output
             
-        loss = compute_loss(y_pred, y, mask, use_mask)
+        loss = compute_loss(y_pred, y, mask, use_mask, dataset_obj)
         loss.backward()
         
         # Gradient clipping
@@ -168,7 +168,7 @@ def evaluate(model, loader, device, dataset_obj, use_mask=True):
             y_pred = output
             
         # 1. Calc Loss (Normalized space)
-        loss = compute_loss(y_pred, y, mask, use_mask)
+        loss = compute_loss(y_pred, y, mask, use_mask, dataset_obj)
         total_loss += loss.item() * x.size(0)
         n += x.size(0)
         
@@ -213,13 +213,13 @@ if __name__ == "__main__":
     USE_PRETRAINED = True  # Set False for Custom Model, True for ResNet
     
     BATCH_SIZE = 32
-    EPOCHS = 200
+    EPOCHS = 250
     LR = 1e-3
     WEIGHT_DECAY = 1e-4
     USE_MASK = False
-    min_y = None  # 7.5987958908081055
-    max_y = None  # 8.784920692443848
-    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_1000m_slices_w.npz"
+    min_y = - 7.5987958908081055
+    max_y =  8.784920692443848
+    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_500m_w.npz"
     
     CUSTOM_CFG = {
         'base_ch': 64,
@@ -235,15 +235,24 @@ if __name__ == "__main__":
         print(f"ERROR: Dataset not found at {NPZ_PATH}")
         exit(1)
 
-    dataset = NPZSequenceDataset(NPZ_PATH, min_y=min_y, max_y=max_y)
+    dataset = NPZSequenceDataset(NPZ_PATH)
     print(f"Dataset length: {len(dataset)}")
-    
-    n_train = int(0.8 * len(dataset))
-    train_ds, val_ds = torch.utils.data.random_split(dataset, [n_train, len(dataset) - n_train])
-    
+
     torch.manual_seed(42)  # Ensure reproducibility
+    g = torch.Generator().manual_seed(42)
+
+    n_total = len(dataset)
+    n_train = int(0.7 * n_total)
+    n_val = int(0.15 * n_total)
+    n_test = n_total - n_train - n_val
+
+    train_ds, val_ds, test_ds = torch.utils.data.random_split(
+        dataset, [n_train, n_val, n_test], generator=g
+    )
+
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, pin_memory=True)
 
     # --- 3. Model Initialization ---
     if USE_PRETRAINED:
@@ -259,7 +268,7 @@ if __name__ == "__main__":
             lr=LR, 
             weight_decay=WEIGHT_DECAY
         )
-        model_name = "resnet18_frozen_2lstm_layers_1000m_slice"
+        model_name = "resnet18_frozen_2lstm_layers_500m"
         
     else:
         print("[INFO] Initializing Custom Temporal U-Net...")
@@ -281,6 +290,7 @@ if __name__ == "__main__":
 
     # --- 4. Training Loop ---
     best_val_loss = float('inf')
+    best_state = None
     save_dir = "models"
     os.makedirs(save_dir, exist_ok=True)
     
@@ -306,6 +316,7 @@ if __name__ == "__main__":
         # Save Best Model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            best_state = copy.deepcopy(model.state_dict())
             print(f"   -> New best model! Saving...")
             
             save_path = os.path.join(save_dir, f"{model_name}_best_skip.pt")
@@ -322,4 +333,12 @@ if __name__ == "__main__":
                 'epoch': epoch
             }, save_path)
 
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    test_loss, test_mae, test_rmse, test_me = evaluate(
+        model, test_loader, device, dataset, use_mask=USE_MASK
+    )
+
     print(f"Training complete. Best Validation Loss: {best_val_loss:.6f}")
+    print(f"Test:  Loss={test_loss:.4f} | MAE={test_mae:.4f} | RMSE={test_rmse:.4f} | ME={test_me:.4f}")

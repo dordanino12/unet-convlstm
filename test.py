@@ -36,14 +36,14 @@ COLORBAR_STEP = 2.0  # Sets the numerical jump (e.g., every 1 m/s)
 COLORBAR_FONT_SIZE = 14  # <--- NEW: Sets the font size for the numbers
 min_y = None #7.5987958908081055
 max_y = None# 8.784920692443848
-focus_thresh = 1.0
+focus_thresh = 2.0
 
 # Paths
 # NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top.npz"
 # CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
-NPZ_PATH = "data/dataset_trajectory_sequences_samples_1000m_slices_w.npz"
-CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_1000m_slice_best_skip.pt"
-SEQUENCE_IDX = 2000
+NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_500m_w.npz"
+CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_500m_best_skip.pt"
+SEQUENCE_IDX = 1000
 CSV_PATH = "data/Dor_2satellites_overpass.csv"
 VIDEO_FPS = 1
 SAVE_PDF_SECTIONS = True
@@ -99,7 +99,7 @@ model.eval()
 # -----------------------------
 # 3. Run Inference
 # -----------------------------
-dataset = NPZSequenceDataset(NPZ_PATH, min_y=min_y, max_y=max_y)
+dataset = NPZSequenceDataset(NPZ_PATH)
 input_seq, gt_vel_seq, mask_seq = dataset[SEQUENCE_IDX]
 T, C, H, W = input_seq.shape
 

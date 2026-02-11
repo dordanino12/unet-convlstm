@@ -2,8 +2,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm
+from torch.utils.data import Dataset
 import numpy as np
 #from train.resnet18 import PretrainedTemporalUNet
 
@@ -208,64 +207,26 @@ class TemporalUNetDualView(nn.Module):
 # NPZ Dataset loader with velocity normalization [-1,1]
 # -----------------------------------------------------
 class NPZSequenceDataset(Dataset):
-    def __init__(self, npz_path, lower_percentile=0.00001, upper_percentile=99.99999, clip_outliers=True, min_y=-7.5987958908081055, max_y= 8.784920692443848, y_transform='asinh', y_transform_scale=None, y_transform_percentile=99):
+    def __init__(self, npz_path):
         data = np.load(npz_path)
         self.X = data["X"].astype(np.float32)
         self.Y = data["Y"].astype(np.float32)
         self.N, self.T, _, self.H, self.W = self.X.shape
 
         # --- Statistics ---
-        self.x_max = np.max(self.X) # We found this is ~43.45
-        # Optional: Add a small buffer or round up to keep scaling fixed even if dataset changes slightly
-        self.norm_const = max(self.x_max, 1.0) 
+        self.x_max = np.max(self.X)
+        self.norm_const = max(self.x_max, 1.0)
 
-        # Use explicit min/max if provided, otherwise fall back to percentiles (in raw space)
-        if (min_y is not None) and (max_y is not None):
-            self.min_vel = float(min_y)
-            self.max_vel = float(max_y)
-            used = "explicit"
-        else:
-            self.min_vel = np.percentile(self.Y, lower_percentile)
-            self.max_vel = np.percentile(self.Y, upper_percentile)
-            used = "percentile"
+        # Symmetric MaxAbsScaler - Fixed scale factor
+        self.scale_factor = 10.0
 
-        self.clip_outliers = clip_outliers
-
-        # Non-linear transform settings
-        self.y_transform = y_transform
-        # default scale is the percentile (e.g., 99th) of absolute values if not provided
-        if y_transform_scale is None:
-            self.y_scale = float(np.percentile(np.abs(self.Y), y_transform_percentile)) if y_transform_percentile is not None else 1.0
-        else:
-            self.y_scale = float(y_transform_scale)
-
-        # Prepare transformed Y for computing transformed min/max used for mapping to [-1,1]
-        def _transform_array(arr):
-            if self.y_transform == 'asinh':
-                return np.arcsinh(arr / self.y_scale)
-            if self.y_transform == 'signed_log':
-                return np.sign(arr) * np.log1p(np.abs(arr) / self.y_scale)
-            return arr
-
-        Y_trans = _transform_array(self.Y)
-
-        # Transformed min/max correspond to transformed versions of raw min/max (if explicit)
-        if used == "explicit":
-            self.trans_min = _transform_array(self.min_vel)
-            self.trans_max = _transform_array(self.max_vel)
-            trans_used = "from_explicit_raw"
-        else:
-            self.trans_min = np.percentile(Y_trans, lower_percentile)
-            self.trans_max = np.percentile(Y_trans, upper_percentile)
-            trans_used = "from_percentile_transformed"
-
-        # Safety: avoid zero division if min==max after transform
-        if self.trans_max == self.trans_min:
-            self.trans_max = self.trans_min + 1.0
-            print("[WARN] Transformed Y max equals min; adjusted to avoid division by zero.")
+        # Store raw statistics for reference
+        self.min_vel = float(np.min(self.Y))
+        self.max_vel = float(np.max(self.Y))
 
         print(f"[INFO] Dataset Loaded. X Range: [0.0, {self.x_max:.2f}]")
-        print(f"[INFO] Y Normalization ({used}); transform={self.y_transform} scale={self.y_scale:.3f} -> trans_range ({trans_used}): [{self.trans_min:.3f}, {self.trans_max:.3f}]")
+        print(f"[INFO] Y Normalization (Symmetric MaxAbsScaler): scale_factor={self.scale_factor}")
+        print(f"[INFO] Y Raw Range: [{self.min_vel:.3f}, {self.max_vel:.3f}] m/s")
 
     def __len__(self):
         return self.N
@@ -275,31 +236,19 @@ class NPZSequenceDataset(Dataset):
         y = torch.from_numpy(self.Y[idx])
 
         # --- STEP 1: CREATE MASK (Using raw physical values) ---
-        # Crucial: Do this BEFORE normalizing x!
         mask = (x[:, 0:1] > 1.1).float()
 
         # --- STEP 2: NORMALIZE X ---
-        # Normalize inputs to [0, 1] range for better convergence
         x = x / self.norm_const
 
-        # --- STEP 3: NORMALIZE Y ---
+        # --- STEP 3: NORMALIZE Y (Symmetric MaxAbsScaler) ---
         y_raw = y.numpy()
-        if self.clip_outliers:
-            y_raw = np.clip(y_raw, self.min_vel, self.max_vel)
 
-        # Apply non-linear transform (in numpy), then scale to [-1,1]
-        if self.y_transform == 'asinh':
-            y_trans = np.arcsinh(y_raw / self.y_scale)
-        elif self.y_transform == 'signed_log':
-            y_trans = np.sign(y_raw) * np.log1p(np.abs(y_raw) / self.y_scale)
-        else:
-            y_trans = y_raw
+        # Divide by scale_factor and clamp to [-1, 1]
+        y_normalized = y_raw / self.scale_factor
+        y_normalized = np.clip(y_normalized, -1.0, 1.0).astype(np.float32)
 
-        # scale transformed values to [-1,1]
-        y_scaled = 2 * (y_trans - self.trans_min) / (self.trans_max - self.trans_min) - 1.0
-        y_scaled = y_scaled.astype(np.float32)
-
-        y = torch.from_numpy(y_scaled)
+        y = torch.from_numpy(y_normalized)
 
         return x, y, mask
 
@@ -309,19 +258,18 @@ class NPZSequenceDataset(Dataset):
         Returns raw y values in original units.
         """
         is_torch = False
+        device = None
         if isinstance(y_norm, torch.Tensor):
             is_torch = True
+            device = y_norm.device  # Save device
             y_norm = y_norm.cpu().numpy()
 
-        y_trans = (y_norm + 1.0) / 2.0 * (self.trans_max - self.trans_min) + self.trans_min
-
-        if self.y_transform == 'asinh':
-            y_raw = np.sinh(y_trans) * self.y_scale
-        elif self.y_transform == 'signed_log':
-            y_raw = np.sign(y_trans) * (np.expm1(np.abs(y_trans)) * self.y_scale)
-        else:
-            y_raw = y_trans
+        # Simple multiplication by scale_factor
+        y_raw = y_norm * self.scale_factor
 
         if is_torch:
-            return torch.from_numpy(y_raw)
+            result = torch.from_numpy(y_raw.astype(np.float32))
+            if device is not None:
+                result = result.to(device)  # Return to original device
+            return result
         return y_raw

@@ -50,7 +50,7 @@ def visualize_cloud_mesh(beta_array, title="Cloud Surface"):
     d_z, d_y, d_x = beta_array.shape
     ax.set_xlim(0, d_x)
     ax.set_ylim(0, d_y)
-    ax.set_zlim(0, d_z)
+    ax.set_zlim(0, min(100, d_z))
 
     plt.colorbar(mesh, ax=ax, label='Cloud Altitude/Depth')
     plt.show()
