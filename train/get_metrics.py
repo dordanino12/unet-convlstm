@@ -39,19 +39,19 @@ from train.resnet18 import PretrainedTemporalUNet
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK = False
+USE_MASK = True
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Paths
-NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_500m_w.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_trainable_2lstm_layers_500m_best_skip.pt"
+NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
+CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_trainable_2lstm_layers_envelop_best_skip.pt"
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
 SCATTER_BIN_WIDTH = 0.05  # Width of each velocity bin (e.g., 0.5 m/s)
-POINTS_PER_BIN = 250  # How many points to sample from each bin (The "X" you requested)
+POINTS_PER_BIN = 150  # How many points to sample from each bin (The "X" you requested)
 SCATTER_RANGE = (-8.0, 8.0)  # Range to define bins over
 
 HIST_BINS = 100  # Number of bins for histograms

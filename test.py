@@ -25,7 +25,7 @@ from plots.create_video_dashboard3d_from_samples import create_3d_plot_img, crea
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK =  "slice_mask"  # True, False, or "slice_mask"
+USE_MASK =  True  # True, False, or "slice_mask"
 SHOW_MASK_IMG = True
 GEO_MODE = "2d"  # "3d" or "2d" (X-Z view)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -41,8 +41,8 @@ focus_thresh = 2.0
 # Paths
 # NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top.npz"
 # CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
-NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_500m_w.npz"
-CHECKPOINT_PATH = "models/resnet18_trainable_2lstm_layers_500m_best_skip.pt"
+NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
+CHECKPOINT_PATH = "models/resnet18_trainable_2lstm_layers_envelop_best_skip.pt"
 SEQUENCE_IDX = 1700
 CSV_PATH = "data/Dor_2satellites_overpass.csv"
 VIDEO_FPS = 1

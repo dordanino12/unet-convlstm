@@ -248,9 +248,9 @@ if __name__ == "__main__":
     LR = 1e-3
     WEIGHT_DECAY = 1e-4
     FREEZE_ENCODER = False  # True: Freeze encoder (faster, less memory), False: Train encoder (slower, more capacity)
-    USE_MASK = "slice_mask"  # True, False, or "slice_mask"
+    USE_MASK = True  # True, False, or "slice_mask"
     UNMASKED_WEIGHT_FACTOR = 0.2  # Weight multiplier for unmasked areas in slice_mask mode
-    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_500m_w.npz"
+    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Running on: {device}")
@@ -295,7 +295,7 @@ if __name__ == "__main__":
 
     # Model name reflects encoder state
     encoder_state = "frozen" if FREEZE_ENCODER else "trainable"
-    model_name = f"resnet18_{encoder_state}_2lstm_layers_500m"
+    model_name = f"resnet18_{encoder_state}_2lstm_layers_envelop"
 
     print(f"[INFO] Encoder is {'FROZEN' if FREEZE_ENCODER else 'TRAINABLE'}")
     print(f"[INFO] Total parameters: {sum(p.numel() for p in model.parameters()):,}")
