@@ -11,13 +11,14 @@ from __future__ import annotations
 import os
 import copy
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
+from torch.cuda.amp import autocast, GradScaler
 import numpy as np
 import torch.fft
 
 # --- Local Imports ---
 from train.dataset import NPZSequenceDataset
-from train.resnet18 import PretrainedTemporalUNet
+from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB2, PretrainedTemporalUNetMitB3
 
 # -----------------------------------------------------
 # Loss Function: Weighted L1 + Gradient Loss
@@ -107,7 +108,7 @@ def compute_loss(y_pred, y, mask=None, use_mask=True, dataset_obj=None, unmasked
 # -----------------------------------------------------
 # Training Loop
 # -----------------------------------------------------
-def train_one_epoch(model, loader, optimizer, device, dataset_obj, use_mask=True, unmasked_weight_factor=0.1):
+def train_one_epoch(model, loader, optimizer, device, dataset_obj, scaler, use_mask=True, unmasked_weight_factor=0.1):
     model.train()
     total_loss, n = 0.0, 0
     
@@ -122,9 +123,10 @@ def train_one_epoch(model, loader, optimizer, device, dataset_obj, use_mask=True
         x, y, mask = x.to(device), y.to(device), mask.to(device)
         
         optimizer.zero_grad(set_to_none=True)
-        
-        # Forward pass
-        output, _ = model(x)
+
+        # Forward pass (AMP)
+        with autocast(enabled=(device.type == "cuda")):
+            output, _ = model(x)
         
         # Compatibility handling
         if isinstance(output, list):
@@ -133,14 +135,16 @@ def train_one_epoch(model, loader, optimizer, device, dataset_obj, use_mask=True
             y_pred = output
             
         loss = compute_loss(y_pred, y, mask, use_mask, dataset_obj, unmasked_weight_factor)
-        loss.backward()
-        
+        scaler.scale(loss).backward()
+
         # Gradient clipping
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        scaler.step(optimizer)
+        scaler.update()
         
-        optimizer.step()
-        
-        total_loss += loss.item() * x.size(0)
+        total_loss += loss.detach().item() * x.size(0)
         n += x.size(0)
 
         # --- Metric Calculation (No Grad) ---
@@ -193,7 +197,8 @@ def evaluate(model, loader, device, dataset_obj, use_mask=True, unmasked_weight_
     for x, y, mask in loader:
         x, y, mask = x.to(device), y.to(device), mask.to(device)
         
-        output, _ = model(x)
+        with autocast(enabled=(device.type == "cuda")):
+            output, _ = model(x)
         
         if isinstance(output, list):
             y_pred = torch.stack(output, dim=1)
@@ -202,7 +207,7 @@ def evaluate(model, loader, device, dataset_obj, use_mask=True, unmasked_weight_
             
         # 1. Calc Loss (Normalized space)
         loss = compute_loss(y_pred, y, mask, use_mask, dataset_obj, unmasked_weight_factor)
-        total_loss += loss.item() * x.size(0)
+        total_loss += loss.detach().item() * x.size(0)
         n += x.size(0)
         
         # 2. Calc Real Metrics (Denormalized space)
@@ -243,14 +248,22 @@ def evaluate(model, loader, device, dataset_obj, use_mask=True, unmasked_weight_
 # -----------------------------------------------------
 if __name__ == "__main__":
     # --- 1. Global Configuration ---
-    BATCH_SIZE = 32
-    EPOCHS = 250
+    BATCH_SIZE_START = 32
+    BATCH_SIZE_FINETUNE = 16
+    EPOCHS_FROZEN = 50
+    EPOCHS_FINETUNE = 100
+    EPOCHS = EPOCHS_FROZEN + EPOCHS_FINETUNE
     LR = 1e-3
+    LR_FINETUNE = 3e-4
     WEIGHT_DECAY = 1e-4
-    FREEZE_ENCODER = False  # True: Freeze encoder (faster, less memory), False: Train encoder (slower, more capacity)
+    BACKBONE = "mit_b2"  # "resnet18", "mit_b2", or "mit_b3"
     USE_MASK = True  # True, False, or "slice_mask"
-    UNMASKED_WEIGHT_FACTOR = 0.2  # Weight multiplier for unmasked areas in slice_mask mode
+    USE_ENVELOP_AS_A_INPUT = False  # Whether to feed GT envelope velocity as an extra input channel
+    UNMASKED_WEIGHT_FACTOR = 0.9  # Weight multiplier for unmasked areas in slice_mask mode
+    TRAIN_AUGMENT = True
     NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
+    GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
+    model_name = f"{BACKBONE}_envelope_dropout_lowdimbotelnack"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Running on: {device}")
@@ -260,8 +273,22 @@ if __name__ == "__main__":
         print(f"ERROR: Dataset not found at {NPZ_PATH}")
         exit(1)
 
-    dataset = NPZSequenceDataset(NPZ_PATH)
+    dataset = NPZSequenceDataset(
+        NPZ_PATH,
+        use_gt_envelope_as_input=USE_ENVELOP_AS_A_INPUT,
+        gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
+        augment=False
+    )
+    train_dataset = NPZSequenceDataset(
+        NPZ_PATH,
+        use_gt_envelope_as_input=USE_ENVELOP_AS_A_INPUT,
+        gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
+        augment=TRAIN_AUGMENT,
+        augment_repeats=4,
+        deterministic_aug=True
+    )
     print(f"Dataset length: {len(dataset)}")
+    _, in_channels, _, _ = dataset[0][0].shape
 
     torch.manual_seed(42)  # Ensure reproducibility
     g = torch.Generator().manual_seed(42)
@@ -271,33 +298,76 @@ if __name__ == "__main__":
     n_val = int(0.15 * n_total)
     n_test = n_total - n_train - n_val
 
-    train_ds, val_ds, test_ds = torch.utils.data.random_split(
-        dataset, [n_train, n_val, n_test], generator=g
-    )
+    print(f"Train sequences (base): {n_train}")
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, pin_memory=True)
-    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, pin_memory=True)
+    perm = torch.randperm(n_total, generator=g).tolist()
+    base_train_idx = perm[:n_train]
+    val_idx = perm[n_train:n_train + n_val]
+    test_idx = perm[n_train + n_val:]
+
+    train_idx = []
+    for r in range(train_dataset.augment_repeats):
+        train_idx.extend([i + r * n_total for i in base_train_idx])
+
+    train_ds = Subset(train_dataset, train_idx)
+    val_ds = Subset(dataset, val_idx)
+    test_ds = Subset(dataset, test_idx)
+
+    print(f"Train sequences (augmented): {len(train_ds)}")
+    print(f"Val sequences: {len(val_ds)}")
+    print(f"Test sequences: {len(test_ds)}")
+
+    def make_loaders(batch_size):
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=True)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=True)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, pin_memory=True)
+        return train_loader, val_loader, test_loader
+
+    train_loader, val_loader, test_loader = make_loaders(BATCH_SIZE_START)
 
     # --- 3. Model Initialization ---
-    print("[INFO] Initializing Pre-trained ResNet18 Model...")
-    model = PretrainedTemporalUNet(
-        out_channels=1,
-        lstm_layers=2,
-        freeze_encoder=FREEZE_ENCODER
-    ).to(device)
+    if BACKBONE == "resnet18":
+        print("[INFO] Initializing Pre-trained ResNet18 Model...")
+        model = PretrainedTemporalUNet(
+            out_channels=1,
+            lstm_layers=2,
+            freeze_encoder=True,
+            in_channels=in_channels
+        ).to(device)
+    elif BACKBONE == "mit_b2":
+        print("[INFO] Initializing Pre-trained MiT-B2 Model...")
+        model = PretrainedTemporalUNetMitB2(
+            out_channels=1,
+            lstm_layers=1,
+            freeze_encoder=True,
+            in_channels=in_channels
+        ).to(device)
+    elif BACKBONE == "mit_b3":
+        print("[INFO] Initializing Pre-trained MiT-B3 Model...")
+        model = PretrainedTemporalUNetMitB3(
+            out_channels=1,
+            lstm_layers=2,
+            freeze_encoder=True,
+            in_channels=in_channels
+        ).to(device)
+    else:
+        raise ValueError(f"Unsupported BACKBONE: {BACKBONE}")
+
+    def set_encoder_trainable(model_obj, trainable):
+        if hasattr(model_obj, "encoder"):
+            for param in model_obj.encoder.parameters():
+                param.requires_grad = trainable
+
+    set_encoder_trainable(model, False)
 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=LR,
         weight_decay=WEIGHT_DECAY
     )
+    scaler = GradScaler(enabled=(device.type == "cuda"))
 
-    # Model name reflects encoder state
-    encoder_state = "frozen" if FREEZE_ENCODER else "trainable"
-    model_name = f"resnet18_{encoder_state}_2lstm_layers_envelop"
-
-    print(f"[INFO] Encoder is {'FROZEN' if FREEZE_ENCODER else 'TRAINABLE'}")
+    print("[INFO] Encoder is FROZEN")
     print(f"[INFO] Total parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"[INFO] Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
@@ -313,9 +383,36 @@ if __name__ == "__main__":
     
     print(f"Starting training for {EPOCHS} epochs...")
 
+    current_frozen = True
+
     for epoch in range(1, EPOCHS + 1):
+        if epoch == EPOCHS_FROZEN + 1:
+            print("[INFO] Switching to fine-tuning phase: unfreezing encoder and reducing batch size.")
+            if best_state is not None:
+                print("[INFO] Loading best frozen weights before fine-tuning.")
+                model.load_state_dict(best_state)
+            current_frozen = False
+            set_encoder_trainable(model, True)
+            train_loader, val_loader, test_loader = make_loaders(BATCH_SIZE_FINETUNE)
+            optimizer = torch.optim.AdamW(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                lr=LR_FINETUNE,
+                weight_decay=WEIGHT_DECAY
+            )
+            scaler = GradScaler(enabled=(device.type == "cuda"))
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=3, verbose=True
+            )
+            print(f"[INFO] Encoder is {'FROZEN' if current_frozen else 'TRAINABLE'}")
         tr_loss, tr_mae, tr_rmse, tr_me = train_one_epoch(
-            model, train_loader, optimizer, device, dataset, use_mask=USE_MASK, unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR
+            model,
+            train_loader,
+            optimizer,
+            device,
+            dataset,
+            scaler,
+            use_mask=USE_MASK,
+            unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR
         )
         
         val_loss, val_mae, val_rmse, val_me = evaluate(
@@ -338,7 +435,7 @@ if __name__ == "__main__":
             
             save_path = os.path.join(save_dir, f"{model_name}_best_skip.pt")
             
-            saved_cfg = {'type': 'resnet18', 'freeze_encoder': FREEZE_ENCODER}
+            saved_cfg = {'type': BACKBONE, 'freeze_encoder': current_frozen}
 
             torch.save({
                 'model_state': model.state_dict(),

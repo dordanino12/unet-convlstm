@@ -67,16 +67,16 @@ class ConvLSTM(nn.Module):
 # New Model: ResNet18 Encoder + Temporal Bottleneck
 # -----------------------------------------------------
 class PretrainedTemporalUNet(nn.Module):
-    def __init__(self, out_channels=1, lstm_layers=1, freeze_encoder=True):
+    def __init__(self, out_channels=1, lstm_layers=1, freeze_encoder=True, in_channels=2, dropout_p=0.2):
         super().__init__()
         
         # 1. Create base U-Net based on ResNet18
         # weights="imagenet" -> Loads pre-trained knowledge
-        # in_channels=2 -> The library automatically adapts the first layer!
+        # in_channels is configurable; the library automatically adapts the first layer.
         self.base_model = smp.Unet(
             encoder_name="resnet18",        
             encoder_weights="imagenet",    
-            in_channels=2,                  
+            in_channels=in_channels,                  
             classes=out_channels,
             encoder_depth=5,
             decoder_channels=(256, 128, 64, 32, 16) # Lightweight and fast decoder
@@ -86,6 +86,8 @@ class PretrainedTemporalUNet(nn.Module):
         self.encoder = self.base_model.encoder
         self.decoder = self.base_model.decoder
         self.head = self.base_model.segmentation_head
+
+        self.dropout = nn.Dropout2d(p=dropout_p) if dropout_p > 0 else nn.Identity()
         
         # 3. Freeze the Encoder (saves memory and prevents Overfitting)
         if freeze_encoder:
@@ -118,13 +120,17 @@ class PretrainedTemporalUNet(nn.Module):
         # Create a ConvLSTM module for each skip feature (all except last bottleneck)
         skip_channels = encoder_out_channels[:-1]
         self.skip_channels = list(skip_channels)
-        self.lstm_skips = nn.ModuleList([
-            ConvLSTM(input_dim=ch, hidden_dim=ch, num_layers=lstm_layers, kernel_size=3)
-            for ch in skip_channels
-        ])
+        lstm_modules = []
+        for ch in skip_channels:
+            if ch <= 0:
+                lstm_modules.append(None)
+            else:
+                lstm_modules.append(ConvLSTM(input_dim=ch, hidden_dim=ch, num_layers=lstm_layers, kernel_size=3))
+        self.lstm_skips = nn.ModuleList([m for m in lstm_modules if m is not None])
+        self._lstm_skip_map = [m is not None for m in lstm_modules]
 
     def forward(self, x_seq):
-        # x_seq shape: [B, T, 1, H, W]
+        # x_seq shape: [B, T, C, H, W]
         B, T, C, H, W = x_seq.shape
         
         # --- A. ENCODER (Frame by Frame) ---
@@ -162,28 +168,233 @@ class PretrainedTemporalUNet(nn.Module):
         
         # The Trick: Replace the last feature in the list (which was static) 
         # with the LSTM output (which is dynamic)
-        features[-1] = lstm_out_flat
+        features[-1] = self.dropout(lstm_out_flat)
 
         # --- OPTIONAL: temporal processing for selected skip connections ---
         # Process all skip connections (features[0..-2]) with their ConvLSTMs
         # Assumes `self.lstm_skips` was constructed with matching order and channels.
-        for i in range(len(self.lstm_skips)):
+        lstm_idx = 0
+        for i, use_lstm in enumerate(self._lstm_skip_map):
+            if not use_lstm:
+                continue
             feat = features[i]
             Ck = feat.shape[1]
+            if Ck == 0:
+                continue
             hk, wk = feat.shape[2], feat.shape[3]
             feat_seq = feat.view(B, T, Ck, hk, wk)
             lstm_in = [feat_seq[:, t] for t in range(T)]
-            lstm_out_list, _ = self.lstm_skips[i](lstm_in)
+            lstm_out_list, _ = self.lstm_skips[lstm_idx](lstm_in)
             lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
-            features[i] = lstm_out_stacked.view(B * T, Ck, hk, wk)
+            features[i] = self.dropout(lstm_out_stacked.view(B * T, Ck, hk, wk))
+            lstm_idx += 1
         
         # Decode
         decoder_out = self.decoder(*features)
         
         # Final output layer
-        output_flat = self.head(decoder_out)
+        output_flat = self.head(self.dropout(decoder_out))
         
         # Reshape back to original shape: [B, T, 1, H, W]
         output_seq = output_flat.view(B, T, -1, H, W)
         
         return output_seq, None # (None because there is no external state currently)
+
+
+# -----------------------------------------------------
+# New Model: MiT-B3 Encoder + Temporal Bottleneck
+# -----------------------------------------------------
+class PretrainedTemporalUNetMitB3(nn.Module):
+    def __init__(self, out_channels=1, lstm_layers=1, freeze_encoder=True, in_channels=2, dropout_p=0.2):
+        super().__init__()
+        self.in_channels = in_channels
+        if in_channels != 3:
+            self.input_adapter = nn.Conv2d(in_channels, 3, kernel_size=1, bias=False)
+        else:
+            self.input_adapter = None
+
+        self.base_model = smp.MAnet(
+            encoder_name="mit_b3",
+            encoder_weights="imagenet",
+            in_channels=3,
+            classes=out_channels,
+            encoder_depth=5,
+            decoder_channels=(512, 256, 128, 64, 32)
+        )
+
+        self.encoder = self.base_model.encoder
+        self.decoder = self.base_model.decoder
+        self.head = self.base_model.segmentation_head
+
+        self.dropout = nn.Dropout2d(p=dropout_p) if dropout_p > 0 else nn.Identity()
+
+        if freeze_encoder:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+            print("[INFO] MiT-B3 Encoder is FROZEN.")
+
+        encoder_out_channels = None
+        if hasattr(self.encoder, 'out_channels'):
+            encoder_out_channels = getattr(self.encoder, 'out_channels')
+        elif hasattr(self.base_model, 'encoder_out_channels'):
+            encoder_out_channels = getattr(self.base_model, 'encoder_out_channels')
+
+        if encoder_out_channels is None:
+            raise RuntimeError("MiT-B3 encoder channels are unavailable.")
+
+        self.lstm_input_dim = encoder_out_channels[-1]
+        self.lstm = ConvLSTM(
+            input_dim=self.lstm_input_dim,
+            hidden_dim=self.lstm_input_dim,
+            num_layers=lstm_layers,
+            kernel_size=3
+        )
+
+        skip_channels = encoder_out_channels[:-1]
+        self.skip_channels = list(skip_channels)
+        lstm_modules = []
+        for ch in skip_channels:
+            if ch <= 0:
+                lstm_modules.append(None)
+            else:
+                lstm_modules.append(ConvLSTM(input_dim=ch, hidden_dim=ch, num_layers=lstm_layers, kernel_size=3))
+        self.lstm_skips = nn.ModuleList([m for m in lstm_modules if m is not None])
+        self._lstm_skip_map = [m is not None for m in lstm_modules]
+
+    def forward(self, x_seq):
+        B, T, C, H, W = x_seq.shape
+        x_flat = x_seq.view(B * T, C, H, W)
+        if self.input_adapter is not None:
+            x_flat = self.input_adapter(x_flat)
+        features = self.encoder(x_flat)
+
+        bottleneck = features[-1]
+        bottleneck_seq = bottleneck.view(B, T, -1, bottleneck.shape[2], bottleneck.shape[3])
+        lstm_in_list = [bottleneck_seq[:, t] for t in range(T)]
+        lstm_out_list, _ = self.lstm(lstm_in_list)
+        lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
+        lstm_out_flat = lstm_out_stacked.view(B * T, -1, bottleneck.shape[2], bottleneck.shape[3])
+        features[-1] = self.dropout(lstm_out_flat)
+
+        lstm_idx = 0
+        for i, use_lstm in enumerate(self._lstm_skip_map):
+            if not use_lstm:
+                continue
+            feat = features[i]
+            Ck = feat.shape[1]
+            if Ck == 0:
+                continue
+            hk, wk = feat.shape[2], feat.shape[3]
+            feat_seq = feat.view(B, T, Ck, hk, wk)
+            lstm_in = [feat_seq[:, t] for t in range(T)]
+            lstm_out_list, _ = self.lstm_skips[lstm_idx](lstm_in)
+            lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
+            features[i] = self.dropout(lstm_out_stacked.view(B * T, Ck, hk, wk))
+            lstm_idx += 1
+
+        decoder_out = self.decoder(*features)
+        output_flat = self.head(self.dropout(decoder_out))
+        output_seq = output_flat.view(B, T, -1, H, W)
+        return output_seq, None
+
+
+# -----------------------------------------------------
+# New Model: MiT-B2 Encoder + Temporal Bottleneck
+# -----------------------------------------------------
+class PretrainedTemporalUNetMitB2(nn.Module):
+    def __init__(self, out_channels=1, lstm_layers=1, freeze_encoder=True, in_channels=2, dropout_p=0.2, proj_channels=64):
+        super().__init__()
+        self.in_channels = in_channels
+        if in_channels != 3:
+            self.input_adapter = nn.Conv2d(in_channels, 3, kernel_size=1, bias=False)
+        else:
+            self.input_adapter = None
+
+        self.base_model = smp.MAnet(
+            encoder_name="mit_b2",
+            encoder_weights="imagenet",
+            in_channels=3,
+            classes=out_channels,
+            encoder_depth=5,
+            decoder_channels=(512, 256, 128, 64, 32)
+        )
+
+        self.encoder = self.base_model.encoder
+        self.decoder = self.base_model.decoder
+        self.head = self.base_model.segmentation_head
+
+        self.dropout = nn.Dropout2d(p=dropout_p) if dropout_p > 0 else nn.Identity()
+
+        if freeze_encoder:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+            print("[INFO] MiT-B2 Encoder is FROZEN.")
+
+        encoder_out_channels = None
+        if hasattr(self.encoder, 'out_channels'):
+            encoder_out_channels = getattr(self.encoder, 'out_channels')
+        elif hasattr(self.base_model, 'encoder_out_channels'):
+            encoder_out_channels = getattr(self.base_model, 'encoder_out_channels')
+
+        if encoder_out_channels is None:
+            raise RuntimeError("MiT-B2 encoder channels are unavailable.")
+
+        bottleneck_in_channels = encoder_out_channels[-1]
+        self.bottleneck_proj = nn.Conv2d(bottleneck_in_channels, proj_channels, kernel_size=1, bias=False)
+        self.bottleneck_expand = nn.Conv2d(proj_channels, bottleneck_in_channels, kernel_size=1, bias=False)
+
+        self.lstm_input_dim = proj_channels
+        self.lstm = ConvLSTM(
+            input_dim=self.lstm_input_dim,
+            hidden_dim=self.lstm_input_dim,
+            num_layers=lstm_layers,
+            kernel_size=3
+        )
+
+        skip_channels = encoder_out_channels[:-1]
+        self.skip_channels = list(skip_channels)
+        lstm_modules = []
+        for ch in skip_channels:
+            if ch <= 0:
+                lstm_modules.append(None)
+            else:
+                lstm_modules.append(ConvLSTM(input_dim=ch, hidden_dim=ch, num_layers=lstm_layers, kernel_size=3))
+        self.lstm_skips = nn.ModuleList([m for m in lstm_modules if m is not None])
+        self._lstm_skip_map = [m is not None for m in lstm_modules]
+
+    def forward(self, x_seq):
+        B, T, C, H, W = x_seq.shape
+        x_flat = x_seq.view(B * T, C, H, W)
+        if self.input_adapter is not None:
+            x_flat = self.input_adapter(x_flat)
+        features = self.encoder(x_flat)
+
+        bottleneck = self.bottleneck_proj(features[-1])
+        bottleneck_seq = bottleneck.view(B, T, -1, bottleneck.shape[2], bottleneck.shape[3])
+        lstm_in_list = [bottleneck_seq[:, t] for t in range(T)]
+        lstm_out_list, _ = self.lstm(lstm_in_list)
+        lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
+        lstm_out_flat = lstm_out_stacked.view(B * T, -1, bottleneck.shape[2], bottleneck.shape[3])
+        bottleneck_restored = self.bottleneck_expand(lstm_out_flat)
+        features[-1] = self.dropout(bottleneck_restored)
+
+        lstm_idx = 0
+        for i, use_lstm in enumerate(self._lstm_skip_map):
+            if not use_lstm:
+                continue
+            feat = features[i]
+            Ck = feat.shape[1]
+            if Ck == 0:
+                continue
+            hk, wk = feat.shape[2], feat.shape[3]
+            feat_seq = feat.view(B, T, Ck, hk, wk)
+            lstm_in = [feat_seq[:, t] for t in range(T)]
+            lstm_out_list, _ = self.lstm_skips[lstm_idx](lstm_in)
+            lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
+            features[i] = self.dropout(lstm_out_stacked.view(B * T, Ck, hk, wk))
+            lstm_idx += 1
+
+        decoder_out = self.decoder(*features)
+        output_flat = self.head(self.dropout(decoder_out))
+        output_seq = output_flat.view(B, T, -1, H, W)
+        return output_seq, None

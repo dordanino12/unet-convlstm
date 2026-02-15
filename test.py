@@ -17,7 +17,7 @@ sys.path.append(parent_dir)
 
 # Import model classes
 from train.dataset import NPZSequenceDataset
-from train.resnet18 import PretrainedTemporalUNet
+from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB2, PretrainedTemporalUNetMitB3
 # 3D/2D dashboard helpers
 from plots.create_video_dashboard3d_from_samples import create_3d_plot_img, create_2d_plot_img, load_camera_csv
 
@@ -25,8 +25,7 @@ from plots.create_video_dashboard3d_from_samples import create_3d_plot_img, crea
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK =  True  # True, False, or "slice_mask"
-SHOW_MASK_IMG = True
+
 GEO_MODE = "2d"  # "3d" or "2d" (X-Z view)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -42,8 +41,16 @@ focus_thresh = 2.0
 # NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top.npz"
 # CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
 NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
-CHECKPOINT_PATH = "models/resnet18_trainable_2lstm_layers_envelop_best_skip.pt"
-SEQUENCE_IDX = 1700
+GT_ENVELOPE_NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
+CHECKPOINT_PATH = "models/mit_b2_envelope_dropout_lowdimbotelnack_best_skip.pt"
+USE_MASK =  True  # True, False, or "slice_mask"
+SHOW_MASK_IMG = True
+USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
+BACKBONE = "mit_b2"  # "resnet18", "mit_b2", or "mit_b3"
+SEQUENCE_IDX = 1000
+USE_TEST_SPLIT = True
+TEST_SPLIT_SEED = 42
+TEST_SEQ_RANK = 200
 CSV_PATH = "data/Dor_2satellites_overpass.csv"
 VIDEO_FPS = 1
 SAVE_PDF_SECTIONS = True
@@ -68,28 +75,83 @@ def apply_pdf_layout(fig, ax):
 # -----------------------------
 # 2. Load Model Logic
 # -----------------------------
+# -----------------------------
+# 3. Run Inference
+# -----------------------------
+dataset = NPZSequenceDataset(
+    NPZ_PATH,
+    use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+    gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH
+)
+if USE_TEST_SPLIT:
+    g = torch.Generator().manual_seed(TEST_SPLIT_SEED)
+    n_total = len(dataset)
+    n_train = int(0.7 * n_total)
+    n_val = int(0.15 * n_total)
+    n_test = n_total - n_train - n_val
+    _, _, test_ds = torch.utils.data.random_split(
+        dataset, [n_train, n_val, n_test], generator=g
+    )
+    if TEST_SEQ_RANK < 0 or TEST_SEQ_RANK >= len(test_ds):
+        raise ValueError(
+            f"TEST_SEQ_RANK={TEST_SEQ_RANK} is out of range for test set size {len(test_ds)}"
+        )
+    SEQUENCE_IDX = int(test_ds.indices[TEST_SEQ_RANK])
+    print(
+        f"[INFO] Using test split index {TEST_SEQ_RANK} -> global index {SEQUENCE_IDX}"
+    )
+input_seq, gt_vel_seq, mask_seq = dataset[SEQUENCE_IDX]
+T, C, H, W = input_seq.shape
+
+gt_env_seq = None
+if os.path.exists(GT_ENVELOPE_NPZ_PATH):
+    try:
+        env_data = np.load(GT_ENVELOPE_NPZ_PATH)
+        gt_env_seq = env_data["Y"].astype(np.float32)
+        if gt_env_seq.shape[1:] != gt_vel_seq.shape:
+            print(
+                f"[WARN] Envelope Y shape {gt_env_seq.shape} does not match target sequence shape {gt_vel_seq.shape}"
+            )
+            gt_env_seq = None
+    except Exception as e:
+        print(f"[WARN] Could not load GT envelope NPZ: {e}")
+
 print(f"[INFO] Loading checkpoint: {CHECKPOINT_PATH}")
 checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
 
 cfg = checkpoint.get('config', {})
+model_in_channels = cfg.get('in_channels', C)
 
-print(f"[INFO] Loading ResNet18 Model...")
-model = PretrainedTemporalUNet(
-    out_channels=1,
-    lstm_layers=2,
-    freeze_encoder=cfg.get('freeze_encoder', True)
-)
+if BACKBONE == "resnet18":
+    print("[INFO] Loading ResNet18 Model...")
+    model = PretrainedTemporalUNet(
+        out_channels=1,
+        lstm_layers=2,
+        freeze_encoder=cfg.get('freeze_encoder', True),
+        in_channels=model_in_channels
+    )
+elif BACKBONE == "mit_b2":
+    print("[INFO] Loading MiT-B2 Model...")
+    model = PretrainedTemporalUNetMitB2(
+        out_channels=1,
+        lstm_layers=1,
+        freeze_encoder=cfg.get('freeze_encoder', True),
+        in_channels=model_in_channels
+    )
+elif BACKBONE == "mit_b3":
+    print("[INFO] Loading MiT-B3 Model...")
+    model = PretrainedTemporalUNetMitB3(
+        out_channels=1,
+        lstm_layers=2,
+        freeze_encoder=cfg.get('freeze_encoder', True),
+        in_channels=model_in_channels
+    )
+else:
+    raise ValueError(f"Unsupported BACKBONE: {BACKBONE}")
 
 model.load_state_dict(checkpoint['model_state'])
 model.to(DEVICE)
 model.eval()
-
-# -----------------------------
-# 3. Run Inference
-# -----------------------------
-dataset = NPZSequenceDataset(NPZ_PATH)
-input_seq, gt_vel_seq, mask_seq = dataset[SEQUENCE_IDX]
-T, C, H, W = input_seq.shape
 
 # Denormalize GT (use dataset.denormalize which handles non-linear transform)
 gt_vel_denorm = dataset.denormalize(gt_vel_seq)
@@ -102,6 +164,21 @@ vmax_fixed = dataset.max_pos_val
 # --- Non-linear color normalization to emphasize -3..3 while keeping full range ---
 # Use SymLogNorm with a linear threshold around `focus_thresh` (e.g., 3 m/s)
 norm = mcolors.SymLogNorm(linthresh=focus_thresh, linscale=1.0, vmin=vmin_fixed, vmax=vmax_fixed)
+
+env_vmin_fixed = None
+env_vmax_fixed = None
+env_norm = None
+if gt_env_seq is not None:
+    env_max_pos = float(np.max(gt_env_seq))
+    env_max_neg = float(np.abs(np.min(gt_env_seq)))
+    env_vmin_fixed = -env_max_neg
+    env_vmax_fixed = env_max_pos
+    env_norm = mcolors.SymLogNorm(
+        linthresh=focus_thresh,
+        linscale=1.0,
+        vmin=env_vmin_fixed,
+        vmax=env_vmax_fixed
+    )
 
 # Create a `jet`-based colormap
 base_cmap = plt.get_cmap('jet', 256)
@@ -379,6 +456,9 @@ for t_len in range(1, T + 1):
 
     gt_frame = gt_vel_denorm[last_idx, 0].cpu().numpy()
     pred_frame = pred_vel_denorm[last_idx, 0]
+    gt_env_frame = None
+    if gt_env_seq is not None:
+        gt_env_frame = gt_env_seq[SEQUENCE_IDX, last_idx, 0]
 
     # Get mask for display (handles "slice_mask" mode)
     mask_frame, mask_label = get_mask_for_display(mask_seq, t_len, USE_MASK)
@@ -414,12 +494,16 @@ for t_len in range(1, T + 1):
         mask_invalid = mask_frame <= 0.1
         gt_display = np.ma.masked_where(mask_invalid, gt_frame)
         pred_display = np.ma.masked_where(mask_invalid, pred_frame)
+        env_display = None
+        if gt_env_frame is not None:
+            env_display = np.ma.masked_where(mask_invalid, gt_env_frame)
         cmap_vel = cmap_custom.copy()
         cmap_vel.set_bad(color='black')
     else:
         # No mask or slice_mask: show full velocity images without masking
         gt_display = gt_frame
         pred_display = pred_frame
+        env_display = gt_env_frame
         cmap_vel = cmap_custom
 
     # Use fixed plotting range so the color scale is stable across frames
@@ -428,9 +512,9 @@ for t_len in range(1, T + 1):
 
     # --- Figure Layout Logic ---
     if have_geo:
-        fig = plt.figure(figsize=(16, 9))
-        gs = fig.add_gridspec(2, 3, width_ratios=[1, 1, 1], hspace=0.35, wspace=0.15)
-        axes = np.empty((2, 3), dtype=object)
+        fig = plt.figure(figsize=(20, 9))
+        gs = fig.add_gridspec(2, 4, width_ratios=[1, 1, 1, 1], hspace=0.35, wspace=0.15)
+        axes = np.empty((2, 4), dtype=object)
 
         # Col 0: Inputs
         axes[0, 0] = fig.add_subplot(gs[0, 0])
@@ -440,15 +524,19 @@ for t_len in range(1, T + 1):
         axes[0, 1] = fig.add_subplot(gs[0, 1])
         axes[1, 1] = fig.add_subplot(gs[1, 1])
 
-        # Col 2: 3D & Mask
+        # Col 2: GT Envelope
+        axes[0, 2] = fig.add_subplot(gs[0, 2])
+        axes[1, 2] = fig.add_subplot(gs[1, 2])
+
+        # Col 3: 3D & Mask
         if SHOW_MASK_IMG:
-            axes[0, 2] = fig.add_subplot(gs[0, 2])
-            axes[1, 2] = fig.add_subplot(gs[1, 2])
+            axes[0, 3] = fig.add_subplot(gs[0, 3])
+            axes[1, 3] = fig.add_subplot(gs[1, 3])
         else:
-            axes[0, 2] = fig.add_subplot(gs[:, 2])
-            axes[1, 2] = None
+            axes[0, 3] = fig.add_subplot(gs[:, 3])
+            axes[1, 3] = None
     else:
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        fig, axes = plt.subplots(2, 4, figsize=(18, 10))
 
     fig.suptitle(f"Sequence: {SEQUENCE_IDX} | Frame: {t_len}/{T}", fontsize=16, fontweight='bold')
 
@@ -524,7 +612,27 @@ for t_len in range(1, T + 1):
         cbar2.ax.tick_params(labelsize=COLORBAR_FONT_SIZE)
         # #############################
 
-    # 5. Geo Plot (3D or 2D X-Z)
+    # 5. GT Envelope (Top Right-Middle)
+    if gt_env_frame is not None:
+        im_env = axes[0, 2].imshow(env_display, cmap=cmap_vel, norm=env_norm)
+        axes[0, 2].set_title("GT Envelope Velocity [m/s]", pad=15, fontsize=12, fontweight='bold')
+        set_km_axis(axes[0, 2], gt_env_frame.shape[0], gt_env_frame.shape[1])
+        if have_geo:
+            cbar_env = fig.colorbar(im_env, ax=axes[0, 2], fraction=0.046, pad=0.04)
+            cbar_env.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+            if COLORBAR_STEP and COLORBAR_STEP > 0:
+                ticks = np.arange(env_vmin_fixed, env_vmax_fixed + COLORBAR_STEP, COLORBAR_STEP)
+                if env_vmin_fixed < 0 < env_vmax_fixed and 0.0 not in ticks:
+                    ticks = np.sort(np.append(ticks, 0.0))
+                cbar_env.set_ticks(ticks)
+            cbar_env.ax.tick_params(labelsize=COLORBAR_FONT_SIZE)
+    else:
+        axes[0, 2].axis('off')
+
+    if axes[1, 2] is not None:
+        axes[1, 2].axis('off')
+
+    # 6. Geo Plot (3D or 2D X-Z)
     geo_image_rgb = None
     geo_positions = None
     if have_geo:
@@ -543,24 +651,24 @@ for t_len in range(1, T + 1):
                                              fixed_bounds=fixed_limits_3d)
             img_geo_rgb = cv2.cvtColor(img_geo, cv2.COLOR_BGR2RGB)
             geo_image_rgb = img_geo_rgb
-            axes[0, 2].imshow(img_geo_rgb)
-            axes[0, 2].axis('off')
+            axes[0, 3].imshow(img_geo_rgb)
+            axes[0, 3].axis('off')
         except Exception:
-            axes[0, 2].text(0.5, 0.5, '3D error', ha='center')
-            axes[0, 2].axis('off')
+            axes[0, 3].text(0.5, 0.5, '3D error', ha='center')
+            axes[0, 3].axis('off')
     elif not have_geo:
-        axes[0, 2].axis('off')
+        axes[0, 3].axis('off')
 
-    # 6. Mask Plot
+    # 7. Mask Plot
     if SHOW_MASK_IMG:
         if have_geo:
-            axes[1, 2].imshow(mask_frame, cmap='gray', vmin=0, vmax=1)
-            axes[1, 2].set_title(mask_label, pad=8)
-            axes[1, 2].axis('off')
+            axes[1, 3].imshow(mask_frame, cmap='gray', vmin=0, vmax=1)
+            axes[1, 3].set_title(mask_label, pad=8)
+            axes[1, 3].axis('off')
         else:
-            axes[1, 2].imshow(mask_frame, cmap='gray', vmin=0, vmax=1)
-            axes[1, 2].set_title(mask_label, pad=8)
-            axes[1, 2].axis('off')
+            axes[1, 3].imshow(mask_frame, cmap='gray', vmin=0, vmax=1)
+            axes[1, 3].set_title(mask_label, pad=8)
+            axes[1, 3].axis('off')
 
     plt.tight_layout()
 
@@ -597,6 +705,13 @@ for t_len in range(1, T + 1):
         save_section_pdf(mask_frame, "Cloud Mask", os.path.join(frame_dir, "mask.pdf"),
                          cmap='gray', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m,
                          vmin=0, vmax=1)
+
+        # GT Envelope
+        if gt_env_frame is not None:
+            save_section_pdf(env_display, "GT Envelope Velocity [m/s]", os.path.join(frame_dir, "gt_envelope.pdf"),
+                 cmap=cmap_vel, norm_obj=env_norm, add_colorbar=True,
+                     m_per_pixel=m_per_pixel, extent_m=extent_m, vmin=env_vmin_fixed, vmax=env_vmax_fixed,
+                     tick_step=COLORBAR_STEP)
 
         # Geo plot (if exists)
         if GEO_MODE == "2d" and geo_positions is not None:

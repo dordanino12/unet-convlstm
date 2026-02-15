@@ -10,8 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 # 1. CONFIGURATION
 # ---------------------------------------------------------
 root_images = '/wdata_visl/danino/dataset_rendered_data_spp512_g0/'
-root_maps = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(vel_maps_slice_1500m_nadir)/'
-output_path = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_1500m.npz"
+root_maps = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(vel_maps_slice_2000m_nadir)/'
+output_path = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_2000m.npz"
 
 SEQ_LEN = 12  # Time 0 to 220 (12 frames)
 NUM_SAMPLES = 49  # Samples 000 to 048
@@ -46,7 +46,7 @@ def get_file_path(folder, sample_idx, view_idx=None, is_map=False):
 
     for filename, filepath in files_dict.items():
         if is_map:
-            if f"{s_id_str}_" in filename and "_view_0_slice_1500m" in filename:
+            if f"{s_id_str}_" in filename and "_view_0_slice_2000m" in filename:
                 return filepath
         else:
             if f"{s_id_str}_" in filename and f"_view_{view_idx}" in filename:

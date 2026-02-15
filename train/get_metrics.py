@@ -33,7 +33,7 @@ sys.path.append(parent_dir)
 
 # Import model classes
 from train.dataset import NPZSequenceDataset
-from train.resnet18 import PretrainedTemporalUNet
+from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB2, PretrainedTemporalUNetMitB3
 
 # -----------------------------
 # Configuration
@@ -41,17 +41,20 @@ from train.resnet18 import PretrainedTemporalUNet
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 USE_MASK = True
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
+BACKBONE = "mit_b2"  # "resnet18", "mit_b2", or "mit_b3"
 
 # Paths
-NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_trainable_2lstm_layers_envelop_best_skip.pt"
+NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
+GT_ENVELOPE_NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
+CHECKPOINT_PATH = "models/mit_b2_envelope_dropout_lowdimbotelnack_best_skip.pt"
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
-SCATTER_BIN_WIDTH = 0.05  # Width of each velocity bin (e.g., 0.5 m/s)
-POINTS_PER_BIN = 150  # How many points to sample from each bin (The "X" you requested)
+SCATTER_BIN_WIDTH = 0.02  # Width of each velocity bin (e.g., 0.5 m/s)
+POINTS_PER_BIN = 70  # How many points to sample from each bin (The "X" you requested)
 SCATTER_RANGE = (-8.0, 8.0)  # Range to define bins over
 
 HIST_BINS = 100  # Number of bins for histograms
@@ -59,28 +62,58 @@ min_y = None  # 7.5987958908081055
 max_y = None  # 8.784920692443848
 
 # -----------------------------
-# 2. Load Model Logic
+# 2. Process Validation Dataset Only
+# -----------------------------
+full_dataset = NPZSequenceDataset(
+    NPZ_PATH,
+    use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+    gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH
+)
+_, C, _, _ = full_dataset[0][0].shape
+
+# -----------------------------
+# 3. Load Model Logic
 # -----------------------------
 print(f"[INFO] Loading checkpoint: {CHECKPOINT_PATH}")
 checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
 
 cfg = checkpoint.get('config', {})
+model_in_channels = cfg.get('in_channels', C)
 
-print(f"[INFO] Loading ResNet18 Model...")
-model = PretrainedTemporalUNet(
-    out_channels=1,
-    lstm_layers=2,
-    freeze_encoder=cfg.get('freeze_encoder', True)
-)
+if BACKBONE == "resnet18":
+    print("[INFO] Loading ResNet18 Model...")
+    model = PretrainedTemporalUNet(
+        out_channels=1,
+        lstm_layers=2,
+        freeze_encoder=cfg.get('freeze_encoder', True),
+        in_channels=model_in_channels
+    )
+elif BACKBONE == "mit_b2":
+    print("[INFO] Loading MiT-B2 Model...")
+    model = PretrainedTemporalUNetMitB2(
+        out_channels=1,
+        lstm_layers=1,
+        freeze_encoder=cfg.get('freeze_encoder', True),
+        in_channels=model_in_channels
+    )
+elif BACKBONE == "mit_b3":
+    print("[INFO] Loading MiT-B3 Model...")
+    model = PretrainedTemporalUNetMitB3(
+        out_channels=1,
+        lstm_layers=2,
+        freeze_encoder=cfg.get('freeze_encoder', True),
+        in_channels=model_in_channels
+    )
+else:
+    raise ValueError(f"Unsupported BACKBONE: {BACKBONE}")
 
-model.load_state_dict(checkpoint['model_state'])
+load_result = model.load_state_dict(checkpoint['model_state'], strict=False)
+if load_result.missing_keys:
+    print(f"[WARN] Missing keys when loading checkpoint: {load_result.missing_keys}")
+if load_result.unexpected_keys:
+    print(f"[WARN] Unexpected keys when loading checkpoint: {load_result.unexpected_keys}")
 model.to(DEVICE)
 model.eval()
-
-# -----------------------------
-# 3. Process Validation Dataset Only
-# -----------------------------
-full_dataset = NPZSequenceDataset(NPZ_PATH)
 
 
 # Re-create the split exactly as in training (70% train, 15% val, 15% test)
@@ -212,8 +245,10 @@ if len(scatter_gt_list) > 0:
             x_scatter = gt_vals
             y_scatter = pred_vals
 
-        scatter_min = min(gt_vals.min(), pred_vals.min())
-        scatter_max = max(gt_vals.max(), pred_vals.max())
+        #scatter_min = min(gt_vals.min(), pred_vals.min())
+        #scatter_max = max(gt_vals.max(), pred_vals.max())
+        scatter_min = gt_vals.min()
+        scatter_max = gt_vals.max()
         scatter_range_data = max(abs(scatter_min), abs(scatter_max))
         scatter_range_padded = scatter_range_data * 1.1
         return x_scatter, y_scatter, scatter_min, scatter_max, scatter_range_padded
