@@ -28,7 +28,7 @@ def main(start_folder_name=None, end_folder_name=None):
     SPP = 8192
     RES = 256
     G_VALUE = 0.85
-    start_folder_name = '0000005640'
+    start_folder_name = '0000006240'
     end_folder_name = '0000010000'
     # ==========================================
     # 2. SETUP DATA & FOLDERS

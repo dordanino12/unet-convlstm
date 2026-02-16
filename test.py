@@ -8,6 +8,9 @@ import os
 import sys
 import cv2
 
+# Use torch.amp.autocast for AMP on newer PyTorch
+from torch.amp import autocast
+
 # ---------------------------------------------------------
 # FIX IMPORT PATH
 # ---------------------------------------------------------
@@ -17,7 +20,7 @@ sys.path.append(parent_dir)
 
 # Import model classes
 from train.dataset import NPZSequenceDataset
-from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB2, PretrainedTemporalUNetMitB3
+from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, PretrainedTemporalUNetMitB2, PretrainedTemporalUNetMitB3
 # 3D/2D dashboard helpers
 from plots.create_video_dashboard3d_from_samples import create_3d_plot_img, create_2d_plot_img, load_camera_csv
 
@@ -42,11 +45,11 @@ focus_thresh = 2.0
 # CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
 NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
 GT_ENVELOPE_NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
-CHECKPOINT_PATH = "models/mit_b2_envelope_dropout_lowdimbotelnack_best_skip.pt"
+CHECKPOINT_PATH = "models/mit_b1_envelop_best_skip.pt"
 USE_MASK =  True  # True, False, or "slice_mask"
 SHOW_MASK_IMG = True
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
-BACKBONE = "mit_b2"  # "resnet18", "mit_b2", or "mit_b3"
+BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
 SEQUENCE_IDX = 1000
 USE_TEST_SPLIT = True
 TEST_SPLIT_SEED = 42
@@ -122,13 +125,35 @@ checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
 cfg = checkpoint.get('config', {})
 model_in_channels = cfg.get('in_channels', C)
 
+# Auto-detect refiner from checkpoint
+checkpoint_state = checkpoint.get('model_state', checkpoint)
+has_refiner = any('refiner' in k for k in checkpoint_state.keys())
+refiner_hidden_channels = 32
+if has_refiner:
+    for k in checkpoint_state.keys():
+        if 'refiner.net.0.weight' in k:
+            refiner_hidden_channels = checkpoint_state[k].shape[0]
+            break
+
 if BACKBONE == "resnet18":
     print("[INFO] Loading ResNet18 Model...")
     model = PretrainedTemporalUNet(
         out_channels=1,
         lstm_layers=2,
         freeze_encoder=cfg.get('freeze_encoder', True),
-        in_channels=model_in_channels
+        in_channels=model_in_channels,
+        use_refiner=has_refiner,
+        refiner_hidden_channels=refiner_hidden_channels
+    )
+elif BACKBONE == "mit_b1":
+    print("[INFO] Loading MiT-B1 Model...")
+    model = PretrainedTemporalUNetMitB1(
+        out_channels=1,
+        lstm_layers=1,
+        freeze_encoder=cfg.get('freeze_encoder', True),
+        in_channels=model_in_channels,
+        use_refiner=has_refiner,
+        refiner_hidden_channels=refiner_hidden_channels
     )
 elif BACKBONE == "mit_b2":
     print("[INFO] Loading MiT-B2 Model...")
@@ -136,7 +161,9 @@ elif BACKBONE == "mit_b2":
         out_channels=1,
         lstm_layers=1,
         freeze_encoder=cfg.get('freeze_encoder', True),
-        in_channels=model_in_channels
+        in_channels=model_in_channels,
+        use_refiner=has_refiner,
+        refiner_hidden_channels=refiner_hidden_channels
     )
 elif BACKBONE == "mit_b3":
     print("[INFO] Loading MiT-B3 Model...")
@@ -144,14 +171,25 @@ elif BACKBONE == "mit_b3":
         out_channels=1,
         lstm_layers=2,
         freeze_encoder=cfg.get('freeze_encoder', True),
-        in_channels=model_in_channels
+        in_channels=model_in_channels,
+        use_refiner=has_refiner,
+        refiner_hidden_channels=refiner_hidden_channels
     )
 else:
     raise ValueError(f"Unsupported BACKBONE: {BACKBONE}")
 
-model.load_state_dict(checkpoint['model_state'])
+load_result = model.load_state_dict(checkpoint_state, strict=False)
+if hasattr(load_result, "missing_keys") and load_result.missing_keys:
+    print(f"[WARN] Missing keys when loading checkpoint: {load_result.missing_keys}")
+if hasattr(load_result, "unexpected_keys") and load_result.unexpected_keys:
+    print(f"[WARN] Unexpected keys when loading checkpoint: {load_result.unexpected_keys}")
+
 model.to(DEVICE)
 model.eval()
+if has_refiner:
+    print(f"[INFO] Refiner ENABLED (hidden_channels={refiner_hidden_channels})")
+else:
+    print("[INFO] Refiner DISABLED (checkpoint has no refiner weights)")
 
 # Denormalize GT (use dataset.denormalize which handles non-linear transform)
 gt_vel_denorm = dataset.denormalize(gt_vel_seq)
@@ -435,7 +473,8 @@ for t_len in range(1, T + 1):
     x_input = input_seq[:t_len].unsqueeze(0).to(DEVICE)
 
     with torch.no_grad():
-        output, _ = model(x_input)
+        with autocast(device_type=DEVICE.type, enabled=(DEVICE.type == "cuda")):
+            output, _ = model(x_input)
 
     if isinstance(output, list):
         pred_tensor = torch.stack(output, dim=1)

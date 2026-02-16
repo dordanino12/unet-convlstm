@@ -33,7 +33,7 @@ sys.path.append(parent_dir)
 
 # Import model classes
 from train.dataset import NPZSequenceDataset
-from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB2, PretrainedTemporalUNetMitB3
+from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, PretrainedTemporalUNetMitB2, PretrainedTemporalUNetMitB3
 
 # -----------------------------
 # Configuration
@@ -42,20 +42,20 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 USE_MASK = True
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
-BACKBONE = "mit_b2"  # "resnet18", "mit_b2", or "mit_b3"
+BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
 
 # Paths
-NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
-GT_ENVELOPE_NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
-CHECKPOINT_PATH = "models/mit_b2_envelope_dropout_lowdimbotelnack_best_skip.pt"
+NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
+GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
+CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/mit_b1_envelop_best_skip.pt"
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
 SCATTER_BIN_WIDTH = 0.02  # Width of each velocity bin (e.g., 0.5 m/s)
-POINTS_PER_BIN = 70  # How many points to sample from each bin (The "X" you requested)
-SCATTER_RANGE = (-8.0, 8.0)  # Range to define bins over
+POINTS_PER_BIN = 30  # How many points to sample from each bin (The "X" you requested)
+SCATTER_RANGE = (-8.5, 8.5)  # Range to define bins over
 
 HIST_BINS = 100  # Number of bins for histograms
 min_y = None  # 7.5987958908081055
@@ -80,13 +80,38 @@ checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False
 cfg = checkpoint.get('config', {})
 model_in_channels = cfg.get('in_channels', C)
 
+# Auto-detect if checkpoint has refiner weights
+checkpoint_state = checkpoint['model_state']
+has_refiner = any('refiner' in key for key in checkpoint_state.keys())
+
+# Auto-detect refiner hidden channels from checkpoint (default 32 if not found)
+refiner_hidden_channels = 32
+if has_refiner:
+    # Try to infer hidden channels from first refiner conv layer
+    for key in checkpoint_state.keys():
+        if 'refiner.net.0.weight' in key:
+            refiner_hidden_channels = checkpoint_state[key].shape[0]
+            break
+
 if BACKBONE == "resnet18":
     print("[INFO] Loading ResNet18 Model...")
     model = PretrainedTemporalUNet(
         out_channels=1,
-        lstm_layers=2,
+        lstm_layers=1,
         freeze_encoder=cfg.get('freeze_encoder', True),
-        in_channels=model_in_channels
+        in_channels=model_in_channels,
+        use_refiner=has_refiner,
+        refiner_hidden_channels=refiner_hidden_channels
+    )
+elif BACKBONE == "mit_b1":
+    print("[INFO] Loading MiT-B1 Model...")
+    model = PretrainedTemporalUNetMitB1(
+        out_channels=1,
+        lstm_layers=1,
+        freeze_encoder=cfg.get('freeze_encoder', True),
+        in_channels=model_in_channels,
+        use_refiner=has_refiner,
+        refiner_hidden_channels=refiner_hidden_channels
     )
 elif BACKBONE == "mit_b2":
     print("[INFO] Loading MiT-B2 Model...")
@@ -94,7 +119,9 @@ elif BACKBONE == "mit_b2":
         out_channels=1,
         lstm_layers=1,
         freeze_encoder=cfg.get('freeze_encoder', True),
-        in_channels=model_in_channels
+        in_channels=model_in_channels,
+        use_refiner=has_refiner,
+        refiner_hidden_channels=refiner_hidden_channels
     )
 elif BACKBONE == "mit_b3":
     print("[INFO] Loading MiT-B3 Model...")
@@ -102,7 +129,9 @@ elif BACKBONE == "mit_b3":
         out_channels=1,
         lstm_layers=2,
         freeze_encoder=cfg.get('freeze_encoder', True),
-        in_channels=model_in_channels
+        in_channels=model_in_channels,
+        use_refiner=has_refiner,
+        refiner_hidden_channels=refiner_hidden_channels
     )
 else:
     raise ValueError(f"Unsupported BACKBONE: {BACKBONE}")
@@ -115,11 +144,17 @@ if load_result.unexpected_keys:
 model.to(DEVICE)
 model.eval()
 
+# Print refiner status
+if has_refiner:
+    print(f"[INFO] ✓ Refiner ENABLED (hidden_channels={refiner_hidden_channels})")
+else:
+    print(f"[INFO] ✗ Refiner DISABLED (checkpoint has no refiner weights)")
 
-# Re-create the split exactly as in training (70% train, 15% val, 15% test)
+
+# Re-create the split exactly as in training (0% train, 15% val, 15% test)
 n_total = len(full_dataset)
-n_train = int(0.7 * n_total)
-n_val = int(0.15 * n_total)
+n_train = int(0.9 * n_total)
+n_val = int(0.1 * n_total)
 n_test = n_total - n_train - n_val
 
 # Use the same seed generator as in training
@@ -127,7 +162,7 @@ generator = torch.Generator().manual_seed(42)
 train_ds, val_ds, test_ds = torch.utils.data.random_split(full_dataset, [n_train, n_val, n_test], generator=generator)
 
 # Evaluate on TEST set
-eval_ds = test_ds
+eval_ds = val_ds
 print(f"[INFO] Dataset loaded. Evaluating on TEST set only ({len(eval_ds)} sequences)")
 
 # Lists to store pixel values
@@ -567,3 +602,4 @@ if len(scatter_gt_list) > 0:
 
 else:
     print("[WARNING] No valid pixels found to plot.")
+

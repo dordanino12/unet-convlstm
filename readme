@@ -9,3 +9,4 @@ Run : ps aux | grep python
 Then run : kill "pid number"
 
 setsid pycharm >/dev/null 2>&1 &
+source /home/danino/PycharmProjects/pythonProject/venv/bin/activate
