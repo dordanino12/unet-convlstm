@@ -80,26 +80,13 @@ output_image_dir = '/home/danino/PycharmProjects/pythonProject/data/output'
 os.makedirs('temp', exist_ok=True)
 
 # Define which rows from your CSV to use
-overpass_indices = [0, 1, 3, 5, 7, 9]
-overpass_indices = [11, 13, 15, 17, 19, 21]
-overpass_indices = [0, 1, 9, 17, 19, 21]
-overpass_indices = [9,10,11,12]
-
-
-# overpass_indices = [0, 3, 6, 9, 12, 15]
-# overpass_indices = [6, 7, 8, 9, 10, 11]
-# overpass_indices = [9, 10, 11, 15, 16, 17]
-# overpass_indices = [0, 1, 2, 30, 31, 32]
-# overpass_indices = [12,13,14, 15, 16, 17]
-# overpass_indices = [7, 8,9]
-# overpass_indices = [0, 1, 2]
-
+overpass_indices = [9]
 
 # --- 2. Set Up the Renderer Parameters ---
 renderer_params = {
     'overpass_csv': csv_file,
     'overpass_indices': overpass_indices,
-    'spp': 512,
+    'spp': 8,
     'g_value': 0,
     'cloud_width': 128,
     'image_res': 256,
@@ -107,8 +94,8 @@ renderer_params = {
     'voxel_res': 0.02,
     'scene_scale': 1000.0,
     'cloud_zrange': [0.0, 4.0],
-    'satellites': 2,
-    'timestamps': 2,
+    'satellites': 1,
+    'timestamps': 1,
     'pad_image': False,
     'dynamic_emitter': True,
     'centralize_cloud': True,

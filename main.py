@@ -18,8 +18,54 @@ import torch.fft
 import math
 
 # --- Local Imports ---
+
 from train.dataset import NPZSequenceDataset
 from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, PretrainedTemporalUNetMitB2, PretrainedTemporalUNetMitB3
+
+# --- Exponent Loss Function ---
+def exponent_loss(y_pred, y, mask=None, use_mask=True):
+    """
+    Computes weighted exponent loss and spatial gradient loss.
+    - Penalizes high-velocity errors more heavily (cubic weighting).
+    - Uses exponent on L1 error.
+    - Ensures numerical stability with epsilon.
+    """
+    # 1. Weighted Exponent Loss
+    abs_diff = (y_pred - y).abs()
+    weight = 1.0 + 4.0 * (y.abs() ** 8)
+
+    if use_mask and mask is not None:
+        numerator = (abs_diff * mask * weight).sum()
+        denominator = (mask * weight).sum() + 1e-8
+        weighted_exp = numerator / denominator
+    else:
+        weighted_exp = (abs_diff * weight).mean()
+
+    # 2. Gradient Loss (Spatial smoothness and edge preservation)
+    def spatial_gradients(tensor):
+        dx = tensor[..., :, 1:] - tensor[..., :, :-1]
+        dy = tensor[..., 1:, :] - tensor[..., :-1, :]
+        return dx, dy
+
+    dx_pred, dy_pred = spatial_gradients(y_pred)
+    dx_gt, dy_gt = spatial_gradients(y)
+
+    # Crop to smallest spatial dim to avoid shape mismatch
+    H_min = min(dx_pred.shape[-2], dy_pred.shape[-2])
+    W_min = min(dx_pred.shape[-1], dy_pred.shape[-1])
+
+    grad_diff = (dx_pred[..., :H_min, :W_min] - dx_gt[..., :H_min, :W_min]).abs() + \
+                (dy_pred[..., :H_min, :W_min] - dy_gt[..., :H_min, :W_min]).abs()
+
+    if use_mask and mask is not None:
+        mask_c = mask[..., :H_min, :W_min]
+        grad_loss = (grad_diff * mask_c).sum() / (mask_c.sum() + 1e-8)
+    else:
+        grad_loss = grad_diff.mean()
+
+    # Combine losses (0.005 weight for gradients)
+    total_loss = weighted_exp + 0.005 * grad_loss
+    return total_loss
 
 # -----------------------------------------------------
 # Loss Function: Weighted L1 + Gradient Loss
@@ -27,9 +73,10 @@ from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, 
 def compute_loss(y_pred, y, mask=None, use_mask=True, dataset_obj=None, unmasked_weight_factor=0.1, debug_bins=False):
 
     abs_diff = (y_pred - y).abs()
-    BIN_MIN = -7.60
-    BIN_MAX = 8.78
-    BIN_WIDTH = 0.5
+    # Dynamically determine bin min/max from y ground truth
+    BIN_MIN = -3.30
+    BIN_MAX = 6.73
+    BIN_WIDTH = 0.1
     NUM_BINS = int(math.ceil((BIN_MAX - BIN_MIN) / BIN_WIDTH))
 
     # Prepare mask for binning (masked pixels only)
@@ -162,7 +209,7 @@ def compute_loss(y_pred, y, mask=None, use_mask=True, dataset_obj=None, unmasked
 # -----------------------------------------------------
 # Training Loop
 # -----------------------------------------------------
-def train_one_epoch(model, loader, optimizer, device, dataset_obj, scaler, use_mask=True, unmasked_weight_factor=0.1, debug_bins_once=False):
+def train_one_epoch(model, loader, optimizer, device, dataset_obj, scaler, use_mask=True, unmasked_weight_factor=0.1, debug_bins_once=False, loss_mode='bins', loss_interp=0.0):
     model.train()
     total_loss, n = 0.0, 0
 
@@ -188,15 +235,34 @@ def train_one_epoch(model, loader, optimizer, device, dataset_obj, scaler, use_m
             y_pred = output
 
         debug_bins = debug_bins_once and batch_idx == 0
-        loss = compute_loss(
-            y_pred,
-            y,
-            mask,
-            use_mask,
-            dataset_obj,
-            unmasked_weight_factor,
-            debug_bins=debug_bins
-        )
+        # Loss selection logic
+        if loss_mode == 'exponent':
+            loss = exponent_loss(y_pred, y, mask, use_mask)
+        elif loss_mode == 'bins':
+            loss = compute_loss(
+                y_pred,
+                y,
+                mask,
+                use_mask,
+                dataset_obj,
+                unmasked_weight_factor,
+                debug_bins=debug_bins
+            )
+        elif loss_mode == 'interp':
+            # Interpolate between exponent and bins loss
+            loss_exp = exponent_loss(y_pred, y, mask, use_mask)
+            loss_bins = compute_loss(
+                y_pred,
+                y,
+                mask,
+                use_mask,
+                dataset_obj,
+                unmasked_weight_factor,
+                debug_bins=debug_bins
+            )
+            loss = (1 - loss_interp) * loss_exp + loss_interp * loss_bins
+        else:
+            raise ValueError(f"Unknown loss_mode: {loss_mode}")
         scaler.scale(loss).backward()
 
         # Gradient clipping
@@ -247,7 +313,7 @@ def train_one_epoch(model, loader, optimizer, device, dataset_obj, scaler, use_m
 # Evaluation Loop
 # -----------------------------------------------------
 @torch.no_grad()
-def evaluate(model, loader, device, dataset_obj, use_mask=True, unmasked_weight_factor=0.1):
+def evaluate(model, loader, device, dataset_obj, use_mask=True, unmasked_weight_factor=0.1, loss_mode='bins', loss_interp=0.0):
     model.eval()
     total_loss, n = 0.0, 0
     
@@ -258,7 +324,7 @@ def evaluate(model, loader, device, dataset_obj, use_mask=True, unmasked_weight_
     
     for x, y, mask in loader:
         x, y, mask = x.to(device), y.to(device), mask.to(device)
-        
+
         with autocast(device_type=device.type, enabled=(device.type == "cuda")):
             output, _ = model(x)
 
@@ -266,9 +332,18 @@ def evaluate(model, loader, device, dataset_obj, use_mask=True, unmasked_weight_
             y_pred = torch.stack(output, dim=1)
         else:
             y_pred = output
-            
-        # 1. Calc Loss (Normalized space)
-        loss = compute_loss(y_pred, y, mask, use_mask, dataset_obj, unmasked_weight_factor)
+
+        # Loss selection logic (same as training)
+        if loss_mode == 'exponent':
+            loss = exponent_loss(y_pred, y, mask, use_mask)
+        elif loss_mode == 'bins':
+            loss = compute_loss(y_pred, y, mask, use_mask, dataset_obj, unmasked_weight_factor)
+        elif loss_mode == 'interp':
+            loss_exp = exponent_loss(y_pred, y, mask, use_mask)
+            loss_bins = compute_loss(y_pred, y, mask, use_mask, dataset_obj, unmasked_weight_factor)
+            loss = (1 - loss_interp) * loss_exp + loss_interp * loss_bins
+        else:
+            raise ValueError(f"Unknown loss_mode: {loss_mode}")
         total_loss += loss.detach().item() * x.size(0)
         n += x.size(0)
         
@@ -314,24 +389,28 @@ if __name__ == "__main__":
     BATCH_SIZE_FINETUNE = 16
 
     # 3-Stage Training Configuration
-    EPOCHS_STAGE1 = 1   # Stage 1: Frozen encoder, no refiner (train decoder/LSTM/head only)
-    EPOCHS_STAGE2 = 1   # Stage 2: Unfreeze encoder, no refiner (train full model except refiner)
-    EPOCHS_STAGE3 = 1   # Stage 3: Freeze full model, train only refiner (fine-tune predictions)
+    EPOCHS_STAGE1 = 50  # Stage 1: Frozen encoder, no refiner (train decoder/LSTM/head only)
+    EPOCHS_STAGE2 = 50   # Stage 2: Unfreeze encoder, no refiner (train full model except refiner)
+    EPOCHS_STAGE3 = 50   # Stage 3: Freeze full model, train only refiner (fine-tune predictions)
     EPOCHS = EPOCHS_STAGE1 + EPOCHS_STAGE2 + EPOCHS_STAGE3
+    # --- Loss schedule parameters ---
+    EXPONENT_EPOCHS = 25
+    INTERP_EPOCHS = 40  # Number of epochs to interpolate between exponent and bins loss (increased for smoother transition)
+
 
     LR_STAGE1 = 1e-3
     LR_STAGE2 = 3e-4
     LR_STAGE3 = 1e-4
     WEIGHT_DECAY = 1e-4
 
-    BACKBONE = "mit_b2"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
-    USE_MASK = True  # True, False, or "slice_mask"
+    BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
+    USE_MASK = "slice_mask"  # True, False, or "slice_mask"
     USE_ENVELOP_AS_A_INPUT = False  # Whether to feed GT envelope velocity as an extra input channel
     UNMASKED_WEIGHT_FACTOR = 0.9  # Weight multiplier for unmasked areas in slice_mask mode
     TRAIN_AUGMENT = False
-    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
+    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_1000m_w.npz"
     GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
-    model_name = f"{BACKBONE}_envelop"
+    model_name = f"{BACKBONE}_1000m_slice_mask_no_gtenv_mix_loss"
 
     # Refiner config
     USE_REFINER = True
@@ -489,7 +568,7 @@ if __name__ == "__main__":
     print(f"\nStarting 3-stage training for {EPOCHS} total epochs...")
     print(f"  Stage 1 (epochs 1-{EPOCHS_STAGE1}): Frozen encoder, no refiner (train decoder/LSTM/head)")
     print(f"  Stage 2 (epochs {EPOCHS_STAGE1+1}-{EPOCHS_STAGE1+EPOCHS_STAGE2}): Unfreeze encoder, no refiner (train full model)")
-    print(f"  Stage 3 (epochs {EPOCHS_STAGE1+EPOCHS_STAGE2+1}-{EPOCHS}): Freeze full model, train only refiner\n")
+    print(f"  Stage 3 (epochs {EPOCHS_STAGE1+EPOCHS_STAGE2+1}-{EPOCHS}): Refiner enabled, freeze rest of the model\n")
 
     for epoch in range(1, EPOCHS + 1):
         # Stage 1 -> Stage 2 transition
@@ -545,7 +624,7 @@ if __name__ == "__main__":
             for param in model.parameters():
                 param.requires_grad = False
 
-            # Enable refiner and unfreeze only refiner parameters
+            # Enable refiner and unfreeze refiner parameters
             if USE_REFINER and not refiner_enabled:
                 if hasattr(model, "enable_refiner"):
                     print("[INFO] Enabling refiner...")
@@ -568,12 +647,25 @@ if __name__ == "__main__":
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode='min', factor=0.5, patience=5, verbose=True
             )
-            best_val_loss = float('inf')  # Reset for Stage 3
+            # Do not reset best_val_loss here; keep tracking best across all stages
             best_state = None
             print("[INFO] STAGE 3: Full Model FROZEN, Only Refiner TRAINABLE")
             print(f"[INFO] Total parameters: {sum(p.numel() for p in model.parameters()):,}")
             print(f"[INFO] Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
             print("="*70 + "\n")
+
+
+        # --- Loss mode selection ---
+        if epoch <= EXPONENT_EPOCHS:
+            loss_mode = 'exponent'
+            loss_interp = 0.0
+        elif epoch <= EXPONENT_EPOCHS + INTERP_EPOCHS:
+            loss_mode = 'interp'
+            # Linearly increase interpolation from 0 to 1
+            loss_interp = (epoch - EXPONENT_EPOCHS) / INTERP_EPOCHS
+        else:
+            loss_mode = 'bins'
+            loss_interp = 1.0
 
         tr_loss, tr_mae, tr_rmse, tr_me = train_one_epoch(
             model,
@@ -584,11 +676,31 @@ if __name__ == "__main__":
             scaler,
             use_mask=USE_MASK,
             unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR,
-            debug_bins_once=DEBUG_BINS_ONCE_PER_EPOCH
+            debug_bins_once=DEBUG_BINS_ONCE_PER_EPOCH,
+            loss_mode=loss_mode,
+            loss_interp=loss_interp,
         )
 
+        # --- Loss mode selection for evaluation ---
+        if epoch <= EXPONENT_EPOCHS:
+            eval_loss_mode = 'exponent'
+            eval_loss_interp = 0.0
+        elif epoch <= EXPONENT_EPOCHS + INTERP_EPOCHS:
+            eval_loss_mode = 'interp'
+            eval_loss_interp = (epoch - EXPONENT_EPOCHS) / INTERP_EPOCHS
+        else:
+            eval_loss_mode = 'bins'
+            eval_loss_interp = 1.0
+
         val_loss, val_mae, val_rmse, val_me = evaluate(
-            model, val_loader, device, dataset, use_mask=USE_MASK, unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR
+            model,
+            val_loader,
+            device,
+            dataset,
+            use_mask=USE_MASK,
+            unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR,
+            loss_mode=eval_loss_mode,
+            loss_interp=eval_loss_interp
         )
 
         # Update scheduler based on Val Loss
@@ -601,29 +713,13 @@ if __name__ == "__main__":
         print(f"  Val:   Loss={val_loss:.4f} | MAE={val_mae:.4f} | RMSE={val_rmse:.4f} | ME={val_me:.4f}")
 
         # Save Best Model (per stage)
-        if val_loss < best_val_loss:
-            should_save = True
-            if current_stage == 2:
-                should_save = val_loss < best_stage1_val_loss
-            elif current_stage == 3:
-                should_save = val_loss < best_stage2_val_loss
-
-            if should_save:
+        # Save best model only after switching to bin loss
+        if loss_mode == 'bins':
+            if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_state = copy.deepcopy(model.state_dict())
-                if current_stage == 1:
-                    best_stage1_state = copy.deepcopy(best_state)
-                    best_stage1_val_loss = best_val_loss
-                elif current_stage == 2:
-                    best_stage2_state = copy.deepcopy(best_state)
-                    best_stage2_val_loss = best_val_loss
-                elif current_stage == 3:
-                    best_stage3_state = copy.deepcopy(best_state)
-                    best_stage3_val_loss = best_val_loss
-                print(f"   -> New best model for {stage_label}! Saving...")
-
-                save_path = os.path.join(save_dir, f"{model_name}_best_skip.pt")
-
+                print(f"   -> New best model for bin loss stage! Saving...")
+                save_path = os.path.join(save_dir, f"{model_name}_best_bin_loss.pt")
                 torch.save({
                     'model_state': model.state_dict(),
                     'config': {'type': BACKBONE, 'in_channels': in_channels, 'stage': current_stage},
@@ -635,21 +731,15 @@ if __name__ == "__main__":
     if best_stage3_state is not None:
         model.load_state_dict(best_stage3_state)
         final_best_val_loss = best_stage3_val_loss
-    elif best_stage2_state is not None:
-        model.load_state_dict(best_stage2_state)
-        final_best_val_loss = best_stage2_val_loss
-    elif best_stage1_state is not None:
-        model.load_state_dict(best_stage1_state)
-        final_best_val_loss = best_stage1_val_loss
-    elif best_state is not None:
+    # Load best model from bin loss stage for final evaluation
+    if best_state is not None:
         model.load_state_dict(best_state)
         final_best_val_loss = best_val_loss
     else:
         final_best_val_loss = float('inf')
 
+    print(f"Training complete. Best Validation Loss: {final_best_val_loss:.6f}")
     test_loss, test_mae, test_rmse, test_me = evaluate(
         model, test_loader, device, dataset, use_mask=USE_MASK, unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR
     )
-
-    print(f"Training complete. Best Validation Loss: {final_best_val_loss:.6f}")
     print(f"Test:  Loss={test_loss:.4f} | MAE={test_mae:.4f} | RMSE={test_rmse:.4f} | ME={test_me:.4f}")

@@ -39,22 +39,22 @@ from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, 
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK = True
+USE_MASK = False
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
 BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
 
 # Paths
-NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
+NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_500m_w.npz"
 GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/mit_b1_envelop_best_skip.pt"
+CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/mit_b1_500m_slice_mask_no_gtenv_mix_loss_best_bin_loss.pt"
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
 SCATTER_BIN_WIDTH = 0.02  # Width of each velocity bin (e.g., 0.5 m/s)
-POINTS_PER_BIN = 30  # How many points to sample from each bin (The "X" you requested)
+POINTS_PER_BIN = 20  # How many points to sample from each bin (The "X" you requested)
 SCATTER_RANGE = (-8.5, 8.5)  # Range to define bins over
 
 HIST_BINS = 100  # Number of bins for histograms
@@ -153,7 +153,7 @@ else:
 
 # Re-create the split exactly as in training (0% train, 15% val, 15% test)
 n_total = len(full_dataset)
-n_train = int(0.9 * n_total)
+n_train = int(0.8 * n_total)
 n_val = int(0.1 * n_total)
 n_test = n_total - n_train - n_val
 
@@ -162,7 +162,7 @@ generator = torch.Generator().manual_seed(42)
 train_ds, val_ds, test_ds = torch.utils.data.random_split(full_dataset, [n_train, n_val, n_test], generator=generator)
 
 # Evaluate on TEST set
-eval_ds = val_ds
+eval_ds = test_ds
 print(f"[INFO] Dataset loaded. Evaluating on TEST set only ({len(eval_ds)} sequences)")
 
 # Lists to store pixel values
@@ -313,7 +313,7 @@ if len(scatter_gt_list) > 0:
 
     # Create scatter plot figure
     fig_scatter, ax_scatter = plt.subplots(figsize=(20, 20), dpi=150)
-    ax_scatter.scatter(x_scatter, y_scatter, c='tab:blue', s=8, alpha=0.3)
+    ax_scatter.scatter(x_scatter, y_scatter, c='tab:blue', s=70, alpha=0.3)
     ax_scatter.plot([-scatter_range_padded, scatter_range_padded], [-scatter_range_padded, scatter_range_padded], 'k--', lw=4)
     ax_scatter.set_xlabel("Ground Truth [m/s]", fontsize=56, fontweight='bold')
     ax_scatter.set_ylabel("Predicted [m/s]", fontsize=56, fontweight='bold')
@@ -340,7 +340,7 @@ if len(scatter_gt_list) > 0:
         )
 
         fig_scatter_t5, ax_scatter_t5 = plt.subplots(figsize=(20, 20), dpi=150)
-        ax_scatter_t5.scatter(x_scatter_t5, y_scatter_t5, c='tab:blue', s=8, alpha=0.3)
+        ax_scatter_t5.scatter(x_scatter_t5, y_scatter_t5, c='tab:blue', s=30, alpha=0.3)
         ax_scatter_t5.plot([-scatter_range_padded_t5, scatter_range_padded_t5], [-scatter_range_padded_t5, scatter_range_padded_t5], 'k--', lw=4)
         ax_scatter_t5.set_xlabel("Ground Truth [m/s]", fontsize=56, fontweight='bold')
         ax_scatter_t5.set_ylabel("Predicted [m/s]", fontsize=56, fontweight='bold')

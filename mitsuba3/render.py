@@ -25,7 +25,8 @@ class MitsubaRenderer:
                  cloud_zrange=[0, 4],
                  satellites=3, timestamps=2, pad_image=True, dynamic_emitter=True, centralize_cloud=True,
                  bitmaps_required=True,
-                 vol_path=None):
+                 vol_path=None,
+                 seed=None):
         self.overpass_csv = overpass_csv
         self.overpass_indices = overpass_indices
         self.spp = spp
@@ -41,6 +42,7 @@ class MitsubaRenderer:
         self.centralize_cloud = centralize_cloud
         self.bitmaps_required = bitmaps_required
         self.vol_path = vol_path
+        self.seed = seed
 
         self.W = self.cloud_width * self.voxel_res # km for all the image
         self.sat_Wx = []
@@ -346,8 +348,12 @@ class MitsubaRenderer:
         tensors = np.array([]).reshape((0, self.film_dim, self.film_dim))
         bitmaps = np.array([]).reshape((0, self.film_dim, self.film_dim))
         for sat in range(self.satellites):
-            im_raw = mi.render(self.scenes[time_part * self.dynamic_emitter],
-                               sensor=self.sensors[time_part * self.satellites + sat], spp=self.spp)
+            im_raw = mi.render(
+                self.scenes[time_part * self.dynamic_emitter],
+                sensor=self.sensors[time_part * self.satellites + sat],
+                spp=self.spp,
+                seed=self.seed  # Pass the seed for reproducibility
+            )
             im_gray = im_raw[:, :, 0]
             # im_gray = np.array(
             #     Image.fromarray((np.array(im_raw) / np.max(im_raw) * 255).astype(np.uint8)).convert('L'))

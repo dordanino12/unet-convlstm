@@ -100,7 +100,7 @@ class RefinerHead(nn.Module):
 # New Model: ResNet18 Encoder + Temporal Bottleneck
 # -----------------------------------------------------
 class PretrainedTemporalUNet(nn.Module):
-    def __init__(self, out_channels=1, lstm_layers=1, freeze_encoder=True, in_channels=2, dropout_p=0.5,
+    def __init__(self, out_channels=1, lstm_layers=1, freeze_encoder=True, in_channels=2, dropout_p=0.3,
                  use_refiner=False, refiner_hidden_channels=32):
         super().__init__()
         self.out_channels = out_channels
@@ -474,7 +474,7 @@ class PretrainedTemporalUNetMitB2(nn.Module):
 # New Model: MiT-B1 Encoder + Temporal Bottleneck
 # -----------------------------------------------------
 class PretrainedTemporalUNetMitB1(nn.Module):
-    def __init__(self, out_channels=1, lstm_layers=1, freeze_encoder=True, in_channels=2, dropout_p=0.2,
+    def __init__(self, out_channels=1, lstm_layers=1, freeze_encoder=True, in_channels=2, dropout_p=0.3,
                  proj_channels=64, use_refiner=False, refiner_hidden_channels=32):
         super().__init__()
         self.out_channels = out_channels
