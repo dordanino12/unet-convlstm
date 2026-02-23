@@ -113,7 +113,7 @@ plt.plot(sorted_mean, camera_var[sort_idx], 'b--', linewidth=2, label='Full Came
 plt.title(f'Variance Comparison: Monte Carlo vs. Camera Noise (SPP={SPP})')
 plt.xlabel('Mean Signal (Electrons - $u_e$)')
 plt.ylabel('Variance ($\sigma^2$)')
-plt.ylim(top=0.80000)
+plt.ylim(top=80000)
 #plt.yscale('log')  # Log scale helps see the MC noise clearly
 #plt.xscale('log')
 plt.legend()
