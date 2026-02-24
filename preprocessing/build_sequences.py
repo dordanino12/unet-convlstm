@@ -9,9 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 # ---------------------------------------------------------
 # 1. CONFIGURATION
 # ---------------------------------------------------------
-root_images = '/wdata_visl/danino/dataset_rendered_data_spp512_g0/'
-root_maps = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(vel_maps_slice_2000m_nadir)/'
-output_path = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_2000m.npz"
+root_images = '/wdata_visl/danino/dataset_rendered_data_spp8192_g085/'
+root_maps = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(vel_maps)/'
+output_path = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w_fixed.npz"
 
 SEQ_LEN = 12  # Time 0 to 220 (12 frames)
 NUM_SAMPLES = 49  # Samples 000 to 048
@@ -19,6 +19,13 @@ NUM_SAMPLES = 49  # Samples 000 to 048
 # --- NEW PARAMETERS ---
 MAX_CHUNKS = None # Set to None to run ALL. Set to 5, 10, etc. for partial runs.
 MAP_TYPE = 'w'  # <--- Select map type here: 'w', 'u', or 'v'
+
+# --- NEW: Specify valid folder ranges ---
+VALID_RANGES = [
+    (2000, 7040),
+    (10180, 12100),
+    (14120, 15680),
+]
 
 
 # ---------------------------------------------------------
@@ -46,7 +53,7 @@ def get_file_path(folder, sample_idx, view_idx=None, is_map=False):
 
     for filename, filepath in files_dict.items():
         if is_map:
-            if f"{s_id_str}_" in filename and "_view_0_slice_2000m" in filename:
+            if f"{s_id_str}_" in filename and "_view_0" in filename:
                 return filepath
         else:
             if f"{s_id_str}_" in filename and f"_view_{view_idx}" in filename:
@@ -91,13 +98,21 @@ def main():
 
     # Get all numbered folders (2000, 2020, etc.)
     all_folders = sorted([f for f in os.listdir(root_images) if f.isdigit()], key=int)
-    print(f"Found {len(all_folders)} time folders.")
+    # Filter folders to only those in valid ranges
+    valid_folders = []
+    for f in all_folders:
+        num = int(f)
+        for start, end in VALID_RANGES:
+            if start <= num <= end:
+                valid_folders.append(f)
+                break
+    print(f"Found {len(valid_folders)} valid time folders in specified ranges.")
 
     sequences_X = []
     sequences_Y = []
 
     # Calculate indices for the chunks
-    chunk_indices = list(range(0, len(all_folders), SEQ_LEN))
+    chunk_indices = list(range(0, len(valid_folders), SEQ_LEN))
 
     # Apply Limit if requested
     if MAX_CHUNKS is not None:
@@ -107,7 +122,7 @@ def main():
     # --- LOOP 1: Process Time Chunks (Trajectories) ---
     for i in tqdm(chunk_indices, desc="Time Chunks"):
 
-        batch_folders = all_folders[i: i + SEQ_LEN]
+        batch_folders = valid_folders[i: i + SEQ_LEN]
 
         # Ensure we have a full sequence of 12 folders
         if len(batch_folders) < SEQ_LEN:

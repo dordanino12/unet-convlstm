@@ -19,7 +19,7 @@ output_vol_file = 'temp/my_cloud.vol'
 os.makedirs('temp', exist_ok=True)
 
 # --- Render Settings ---
-SPP = 512
+SPP = 16384
 NUM_RUNS = 10
 SEED_BASE = 42
 
@@ -27,7 +27,7 @@ renderer_params = {
     'overpass_csv': csv_file,
     'overpass_indices': [9],
     'spp': SPP,
-    'g_value': 0,
+    'g_value': 0.85,
     'cloud_width': 128,
     'image_res': 256,
     'fov': 0.25,
@@ -107,13 +107,13 @@ sorted_mean = flat_mean[sort_idx]
 sorted_mc_var = flat_mc_var[sort_idx]
 
 plt.scatter(flat_mean, flat_mc_var, alpha=0.3, s=1, label='Monte Carlo Variance (Render)', color='gray')
-plt.plot(sorted_mean, sorted_mean, 'r--', linewidth=2, label='Poisson Noise Model (Var = Mean)')
+plt.plot(sorted_mean, sorted_mean, 'r-', linewidth=2, label='Poisson Noise Model (Var = Mean)')
 plt.plot(sorted_mean, camera_var[sort_idx], 'b--', linewidth=2, label='Full Camera Noise Model')
 
 plt.title(f'Variance Comparison: Monte Carlo vs. Camera Noise (SPP={SPP})')
 plt.xlabel('Mean Signal (Electrons - $u_e$)')
 plt.ylabel('Variance ($\sigma^2$)')
-plt.ylim(top=80000)
+plt.ylim(bottom=-100, top=80000)
 #plt.yscale('log')  # Log scale helps see the MC noise clearly
 #plt.xscale('log')
 plt.legend()

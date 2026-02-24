@@ -26,7 +26,7 @@ class MitsubaRenderer:
                  satellites=3, timestamps=2, pad_image=True, dynamic_emitter=True, centralize_cloud=True,
                  bitmaps_required=True,
                  vol_path=None,
-                 seed=None):
+                 seed=41):
         self.overpass_csv = overpass_csv
         self.overpass_indices = overpass_indices
         self.spp = spp

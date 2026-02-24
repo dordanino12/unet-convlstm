@@ -71,7 +71,7 @@ csv_file = '/home/danino/PycharmProjects/pythonProject/data/Dor_2satellites_over
 
 #cloud_data_file = '/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_3D/BOMEX_512x512x200_20m_20m_1s_512_0000005200_1_5'  # This is the pkl file you have
 #cloud_data_file= "/wdata_visl/danino/dataset_256x256x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000002000/sample_001.pkl"
-cloud_data_file= '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000005920/sample_012.pkl'
+cloud_data_file= '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,reff,lwc,U,V,W)_fixed_to_shdom/0000005920/sample_012.pkl'
 #cloud_data_file= "/wdata_visl/danino/dataset_512x512x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000002000/sample_000.pkl"
 
 output_vol_file = 'temp/my_cloud.vol'  # A temporary file this script will create
@@ -86,7 +86,7 @@ overpass_indices = [9]
 renderer_params = {
     'overpass_csv': csv_file,
     'overpass_indices': overpass_indices,
-    'spp': 8,
+    'spp': 512,
     'g_value': 0,
     'cloud_width': 128,
     'image_res': 256,
