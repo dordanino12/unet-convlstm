@@ -11,8 +11,8 @@ mpl.rcParams.update({
     'font.size': 60,              # base font size (bigger)
     'axes.titlesize': 64,         # axes title size
     'axes.labelsize': 56,         # X/Y label size
-    'xtick.labelsize': 52,        # x tick labels
-    'ytick.labelsize': 52,        # y tick labels
+    'xtick.labelsize': 70,        # x tick labels
+    'ytick.labelsize': 70,        # y tick labels
     'legend.fontsize': 52,        # legend if used
     'figure.titlesize': 68,       # figure suptitle
     'figure.dpi': 300,
@@ -255,14 +255,17 @@ if __name__ == "__main__":
 
     # Define Camera
     camera_pos = [214*1000, 1044*1000, 515*1000]
-    camera_pos = [0, 0, 600*1000]
+    camera_pos = [-30*1000, 149*1000, 600*1000]
     #camera_pos = [-154*1000, -747*1000, 558*1000]
     look_at = [0, 0, 1500]
 
     # --- CONFIGURATION ---
     # Choose mode: 'first_hit' (Cloud Surface) or 'slice' (Specific Height)
-    render_mode = 'slice'
-    slice_height_m = 1000.0  # Height in meters to slice (e.g., middle of cloud)
+    render_mode = 'first_hit'
+    slice_height_m = 500.0  # Height in meters to slice (e.g., middle of cloud)
+    
+    # Output mode: True = clean image (only velocity map), False = full (with axes, titles, colorbar)
+    clean_image_mode = True
 
     print(f"Cam: {camera_pos}, Mode: {render_mode}")
 
@@ -312,12 +315,12 @@ if __name__ == "__main__":
         ax.set_ylim(1280, -1280)  # invert Y so top is positive in image coordinates
 
         # Build ticks WITHOUT first and last values to prevent overlap
-        # Show: -1100, -640, 0, 640, 1100 instead of -1280, -640, 0, 640, 1280
-        tick_vals = np.array([-1100, -640, 0, 640, 1100])
+        # Show: -1100, -500, 0, 500, 1100 instead of -1280, -640, 0, 640, 1280
+        tick_vals = np.array([-1100, -500, 0, 500, 1100])
         ax.set_xticks(tick_vals)
         ax.set_yticks(tick_vals)
-        ax.set_xticklabels([f"{int(v)}" for v in tick_vals], fontsize=48, fontweight='bold')
-        ax.set_yticklabels([f"{int(v)}" for v in tick_vals], fontsize=48, fontweight='bold')
+        ax.set_xticklabels([f"{int(v)}" for v in tick_vals], fontsize=70, fontweight='bold')
+        ax.set_yticklabels([f"{int(v)}" for v in tick_vals], fontsize=70, fontweight='bold')
 
         # Enable tick marks with custom styling
         ax.tick_params(
@@ -327,11 +330,11 @@ if __name__ == "__main__":
             length=14,        # length of tick lines
             width=4,          # width of tick lines
             color='black',    # color of tick lines
-            labelsize=48
+            labelsize=70    # make axis numbers large (match set_xticklabels)
         )
 
-        ax.set_xlabel('X [m]', fontsize=52, fontweight='bold')
-        ax.set_ylabel('Y [m]', fontsize=52, fontweight='bold')
+        ax.set_xlabel('X [m]', fontsize=70, fontweight='bold')
+        ax.set_ylabel('Y [m]', fontsize=70, fontweight='bold')
 
     # --- Plotting with centered axes and jet colormap ---
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
@@ -359,43 +362,83 @@ if __name__ == "__main__":
     axes[0].set_title(f"{title_prefix} - Velocity U [m/s]\nLimit: +/-{lim_u:.1f}", pad=24, fontsize=20, fontweight='bold')
     set_centered_meter_axis(axes[0], H, W, m_per_pixel)
     cbar0 = plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
-    cbar0.ax.tick_params(labelsize=22)
+    cbar0.ax.tick_params(labelsize=70)
     cbar0.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
     cbar0.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+
+    # Set colorbar tick labels to be large and bold
+    for label in cbar0.ax.get_yticklabels():
+        label.set_fontsize(70)
+        label.set_fontweight('bold')
 
     # Plot V
     im1 = axes[1].imshow(v_plot, cmap=current_cmap, norm=norm_v, extent=extent_m, interpolation='nearest')
     axes[1].set_title(f"{title_prefix} - Velocity V [m/s]\nLimit: +/-{lim_v:.1f}", pad=24, fontsize=20, fontweight='bold')
     set_centered_meter_axis(axes[1], H, W, m_per_pixel)
     cbar1 = plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-    cbar1.ax.tick_params(labelsize=22)
+    cbar1.ax.tick_params(labelsize=70)
     cbar1.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
     cbar1.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
 
+    # Set colorbar tick labels to be large and bold
+    for label in cbar1.ax.get_yticklabels():
+        label.set_fontsize(70)
+        label.set_fontweight('bold')
+
     # Plot W
     im2 = axes[2].imshow(w_plot, cmap=current_cmap, norm=norm_w, extent=extent_m, interpolation='nearest')
-    axes[2].set_title(f"{title_prefix} - Velocity W [m/s]\nLimit: +/-{lim_w:.1f}", pad=24, fontsize=20, fontweight='bold')
+    axes[2].set_title(f"{title_prefix} - $V_z$ [m/s]\nLimit: +/-{lim_w:.1f}", pad=24, fontsize=20, fontweight='bold')
     set_centered_meter_axis(axes[2], H, W, m_per_pixel)
     cbar2 = plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-    cbar2.ax.tick_params(labelsize=22)
+    cbar2.ax.tick_params(labelsize=70)
     cbar2.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
     cbar2.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+
+    # Set colorbar tick labels to be large and bold
+    for label in cbar2.ax.get_yticklabels():
+        label.set_fontsize(70)
+        label.set_fontweight('bold')
 
     # --- Saving with proper colormaps ---
     print("Saving PDFs...")
     # Save U
     fig_u, ax_u = plt.subplots(figsize=(12, 12), dpi=150)
     im_u = ax_u.imshow(u_plot, cmap=current_cmap, norm=norm_u, extent=extent_m, interpolation='nearest')
-    ax_u.set_title(f"{title_prefix} - Velocity U [m/s]", fontsize=56, fontweight='bold', pad=40)
-    set_centered_meter_axis(ax_u, H, W, m_per_pixel)
-    cbar_u = plt.colorbar(im_u, ax=ax_u, fraction=0.046, pad=0.04)
-    cbar_u.ax.tick_params(labelsize=48)
-    cbar_u.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
-    cbar_u.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
-    plt.tight_layout()
-    # Save PDF only
-    fig_u.set_size_inches(20, 20)
-    plt.subplots_adjust(left=0.17, right=0.92, top=0.95, bottom=0.08)
+    
+    if clean_image_mode:
+        # Clean mode: no axes or title, but with colorbar
+        ax_u.axis('off')
+        cbar_u = plt.colorbar(im_u, ax=ax_u, fraction=0.046, pad=0.04)
+        cbar_u.ax.tick_params(labelsize=70)
+        cbar_u.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+        cbar_u.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+
+        # Set colorbar tick labels to be large and bold
+        for label in cbar_u.ax.get_yticklabels():
+            label.set_fontsize(70)
+            label.set_fontweight('bold')
+
+        plt.tight_layout(pad=0)
+        fig_u.set_size_inches(20, 18)
+        plt.subplots_adjust(left=0, right=0.88, top=1, bottom=0)
+    else:
+        # Full mode: with axes, title, and colorbar
+        ax_u.set_title(f"{title_prefix} - Velocity U [m/s]", fontsize=70, fontweight='bold', pad=40)
+        set_centered_meter_axis(ax_u, H, W, m_per_pixel)
+        cbar_u = plt.colorbar(im_u, ax=ax_u, fraction=0.046, pad=0.04)
+        cbar_u.ax.tick_params(labelsize=70)
+        cbar_u.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+        cbar_u.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+
+        # Set colorbar tick labels to be large and bold
+        for label in cbar_u.ax.get_yticklabels():
+            label.set_fontsize(70)
+            label.set_fontweight('bold')
+
+        plt.tight_layout()
+        fig_u.set_size_inches(20, 18)
+        plt.subplots_adjust(left=0.19, right=0.87, top=0.99, bottom=0.01)
+    
     plt.savefig(os.path.join(output_dir, f"{file_prefix}_U.pdf"), dpi=150)
     plt.close(fig_u)
     print(f"  Saved: {file_prefix}_U.pdf")
@@ -403,16 +446,41 @@ if __name__ == "__main__":
     # Save V
     fig_v, ax_v = plt.subplots(figsize=(12, 12), dpi=150)
     im_v = ax_v.imshow(v_plot, cmap=current_cmap, norm=norm_v, extent=extent_m, interpolation='nearest')
-    ax_v.set_title(f"{title_prefix} - Velocity V [m/s]", fontsize=56, fontweight='bold', pad=40)
-    set_centered_meter_axis(ax_v, H, W, m_per_pixel)
-    cbar_v = plt.colorbar(im_v, ax=ax_v, fraction=0.046, pad=0.04)
-    cbar_v.ax.tick_params(labelsize=48)
-    cbar_v.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
-    cbar_v.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
-    plt.tight_layout()
-    # Save PDF only
-    fig_v.set_size_inches(20, 20)
-    plt.subplots_adjust(left=0.17, right=0.92, top=0.95, bottom=0.08)
+    
+    if clean_image_mode:
+        # Clean mode: no axes or title, but with colorbar
+        ax_v.axis('off')
+        cbar_v = plt.colorbar(im_v, ax=ax_v, fraction=0.046, pad=0.04)
+        cbar_v.ax.tick_params(labelsize=70)
+        cbar_v.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+        cbar_v.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+
+        # Set colorbar tick labels to be large and bold
+        for label in cbar_v.ax.get_yticklabels():
+            label.set_fontsize(70)
+            label.set_fontweight('bold')
+
+        plt.tight_layout(pad=0)
+        fig_v.set_size_inches(20, 18)
+        plt.subplots_adjust(left=0, right=0.88, top=1, bottom=0)
+    else:
+        # Full mode: with axes, title, and colorbar
+        ax_v.set_title(f"{title_prefix} - Velocity V [m/s]", fontsize=70, fontweight='bold', pad=40)
+        set_centered_meter_axis(ax_v, H, W, m_per_pixel)
+        cbar_v = plt.colorbar(im_v, ax=ax_v, fraction=0.046, pad=0.04)
+        cbar_v.ax.tick_params(labelsize=70)
+        cbar_v.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+        cbar_v.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+
+        # Set colorbar tick labels to be large and bold
+        for label in cbar_v.ax.get_yticklabels():
+            label.set_fontsize(70)
+            label.set_fontweight('bold')
+
+        plt.tight_layout()
+        fig_v.set_size_inches(20, 18)
+        plt.subplots_adjust(left=0.19, right=0.87, top=0.99, bottom=0.01)
+    
     plt.savefig(os.path.join(output_dir, f"{file_prefix}_V.pdf"), dpi=150)
     plt.close(fig_v)
     print(f"  Saved: {file_prefix}_V.pdf")
@@ -420,16 +488,41 @@ if __name__ == "__main__":
     # Save W
     fig_w, ax_w = plt.subplots(figsize=(12, 12), dpi=150)
     im_w = ax_w.imshow(w_plot, cmap=current_cmap, norm=norm_w, extent=extent_m, interpolation='nearest')
-    ax_w.set_title(f"{title_prefix} - Velocity W [m/s]", fontsize=56, fontweight='bold', pad=40)
-    set_centered_meter_axis(ax_w, H, W, m_per_pixel)
-    cbar_w = plt.colorbar(im_w, ax=ax_w, fraction=0.046, pad=0.04)
-    cbar_w.ax.tick_params(labelsize=48)
-    cbar_w.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
-    cbar_w.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
-    plt.tight_layout()
-    # Save PDF only
-    fig_w.set_size_inches(20, 20)
-    plt.subplots_adjust(left=0.17, right=0.92, top=0.95, bottom=0.08)
+    
+    if clean_image_mode:
+        # Clean mode: no axes or title, but with colorbar
+        ax_w.axis('off')
+        cbar_w = plt.colorbar(im_w, ax=ax_w, fraction=0.046, pad=0.04)
+        cbar_w.ax.tick_params(labelsize=70)
+        cbar_w.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+        cbar_w.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+
+        # Set colorbar tick labels to be large and bold
+        for label in cbar_w.ax.get_yticklabels():
+            label.set_fontsize(70)
+            label.set_fontweight('bold')
+
+        plt.tight_layout(pad=0)
+        fig_w.set_size_inches(20, 18)
+        plt.subplots_adjust(left=0, right=0.88, top=1, bottom=0)
+    else:
+        # Full mode: with axes, title, and colorbar
+        ax_w.set_title(f"{title_prefix} - $V_z$ [m/s]", fontsize=70, fontweight='bold', pad=40)
+        set_centered_meter_axis(ax_w, H, W, m_per_pixel)
+        cbar_w = plt.colorbar(im_w, ax=ax_w, fraction=0.046, pad=0.04)
+        cbar_w.ax.tick_params(labelsize=70)
+        cbar_w.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+        cbar_w.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+
+        # Set colorbar tick labels to be large and bold
+        for label in cbar_w.ax.get_yticklabels():
+            label.set_fontsize(70)
+            label.set_fontweight('bold')
+
+        plt.tight_layout()
+        fig_w.set_size_inches(20, 18)
+        plt.subplots_adjust(left=0.23, right=0.88, top=0.99, bottom=0.01)
+    
     plt.savefig(os.path.join(output_dir, f"{file_prefix}_W.pdf"), dpi=150)
     plt.close(fig_w)
     print(f"  Saved: {file_prefix}_W.pdf")

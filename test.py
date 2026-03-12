@@ -43,14 +43,14 @@ focus_thresh = 2.0
 # Paths
 # NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top.npz"
 # CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
-NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w_fixed_w.npz"
+NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
 GT_ENVELOPE_NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
 CHECKPOINT_PATH = "models/mit_b1_envelop_mix_loss_best_bin_loss.pt"
 USE_MASK =  True  # True, False, or "slice_mask"
 SHOW_MASK_IMG = True
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
 BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
-SEQUENCE_IDX = 700
+SEQUENCE_IDX = 1000
 USE_TEST_SPLIT = False
 TEST_SPLIT_SEED = 42
 TEST_SEQ_RANK = 49
@@ -413,22 +413,33 @@ def save_geo_2d_pdf(sat_positions, look_at, fixed_bounds, out_path, title):
 
     # Cloud Center (Y-Z)
     cy, cz = to_km(look_at[1]), to_km(look_at[2])
-    ax.scatter(cy, cz, c='#555555', s=400, marker='X', label='Cloud', zorder=3)
+    ax.scatter(cy, cz, c='#555555', s=520, marker='X', label='Cloud', zorder=3)
 
     colors = ['#E74C3C', '#3498DB']
+    sat_labels = ['SAT A', 'SAT B']
     for i, pos in enumerate(sat_positions):
         y_km = to_km(pos[1])
         z_km = to_km(pos[2])
         color = colors[i % len(colors)]
-        ax.scatter(y_km, z_km, c=color, s=260, edgecolors='white', linewidth=2.0, zorder=4)
-        ax.plot([y_km, cy], [z_km, cz], c=color, linestyle='--', alpha=0.5, linewidth=2.0, zorder=2)
+        sat_name = sat_labels[i] if i < len(sat_labels) else f"SAT {i + 1}"
+        ax.scatter(y_km, z_km, c=color, s=420, edgecolors='white', linewidth=4.0, zorder=4)
+        ax.plot([y_km, cy], [z_km, cz], c=color, linestyle='--', alpha=0.95, linewidth=12.0, zorder=2)
+        if i == 0:
+            label_offset = (-14, 12)
+            ha = 'right'
+        elif i == 1:
+            label_offset = (14, 12)
+            ha = 'left'
+        else:
+            label_offset = (0, 12)
+            ha = 'center'
         ax.annotate(
-            f"S{i}",
+            sat_name,
             xy=(y_km, z_km),
-            xytext=(0, 10),
+            xytext=label_offset,
             textcoords='offset points',
-            ha='center', va='bottom',
-            color=color, fontsize=48, fontweight='bold'
+            ha=ha, va='bottom',
+            color=color, fontsize=52, fontweight='bold'
         )
 
     if fixed_bounds:
@@ -537,7 +548,7 @@ for t_len in range(1, T + 1):
         if gt_env_frame is not None:
             env_display = np.ma.masked_where(mask_invalid, gt_env_frame)
         cmap_vel = cmap_custom.copy()
-        cmap_vel.set_bad(color='black')
+        cmap_vel.set_bad(color='white')
     else:
         # No mask or slice_mask: show full velocity images without masking
         gt_display = gt_frame
@@ -609,12 +620,12 @@ for t_len in range(1, T + 1):
 
     # 1. Sat 0
     axes[0, 0].imshow(sat1, cmap='gray')
-    axes[0, 0].set_title("Input Sat 0", pad=20, fontsize=12, fontweight='bold')
+    axes[0, 0].set_title("Input Sat A", pad=20, fontsize=12, fontweight='bold')
     set_km_axis(axes[0, 0], sat1.shape[0], sat1.shape[1])
 
     # 2. Sat 1
     axes[1, 0].imshow(sat2, cmap='gray')
-    axes[1, 0].set_title("Input Sat 1", pad=20, fontsize=12, fontweight='bold')
+    axes[1, 0].set_title("Input Sat B", pad=20, fontsize=12, fontweight='bold')
     set_km_axis(axes[1, 0], sat2.shape[0], sat2.shape[1])
 
     # 3. GT (Top Middle)
@@ -701,11 +712,11 @@ for t_len in range(1, T + 1):
     # 7. Mask Plot
     if SHOW_MASK_IMG:
         if have_geo:
-            axes[1, 3].imshow(mask_frame, cmap='gray', vmin=0, vmax=1)
+            axes[1, 3].imshow(mask_frame, cmap='gray_r', vmin=0, vmax=1)
             axes[1, 3].set_title(mask_label, pad=8)
             axes[1, 3].axis('off')
         else:
-            axes[1, 3].imshow(mask_frame, cmap='gray', vmin=0, vmax=1)
+            axes[1, 3].imshow(mask_frame, cmap='gray_r', vmin=0, vmax=1)
             axes[1, 3].set_title(mask_label, pad=8)
             axes[1, 3].axis('off')
 
@@ -725,9 +736,9 @@ for t_len in range(1, T + 1):
         extent_m = [-half_w_m, half_w_m, half_h_m, -half_h_m]
 
         # Inputs
-        save_section_pdf(sat1, "Input Sat 0", os.path.join(frame_dir, "sat0.pdf"),
+        save_section_pdf(sat1, "Input Sat A", os.path.join(frame_dir, "sat0.pdf"),
                          cmap='gray', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m)
-        save_section_pdf(sat2, "Input Sat 1", os.path.join(frame_dir, "sat1.pdf"),
+        save_section_pdf(sat2, "Input Sat B", os.path.join(frame_dir, "sat1.pdf"),
                          cmap='gray', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m)
 
         # GT and Pred (velocity)
@@ -742,7 +753,7 @@ for t_len in range(1, T + 1):
 
         # Mask
         save_section_pdf(mask_frame, "Cloud Mask", os.path.join(frame_dir, "mask.pdf"),
-                         cmap='gray', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m,
+                         cmap='gray_r', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m,
                          vmin=0, vmax=1)
 
         # GT Envelope

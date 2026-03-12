@@ -7,6 +7,8 @@ import mitsuba as mi
 import pickle
 
 # --- Imports for 3D Plotting ---
+import matplotlib
+matplotlib.use('Agg')  # <-- Added to use Agg backend
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -43,35 +45,33 @@ def set_centered_meter_axis(ax, height, width, m_per_pixel):
     ax.set_ylim(1280, -1280)  # invert Y so top is positive in image coordinates
 
     # Build ticks WITHOUT first and last values to prevent overlap
-    tick_vals = np.array([-1100, -640, 0, 640, 1100])
+    tick_vals = np.array([-1100, -500, 0, 500, 1100])
     ax.set_xticks(tick_vals)
     ax.set_yticks(tick_vals)
-    ax.set_xticklabels([f"{int(v)}" for v in tick_vals], fontsize=48, fontweight='bold')
-    ax.set_yticklabels([f"{int(v)}" for v in tick_vals], fontsize=48, fontweight='bold')
-
-    # Enable tick marks with custom styling
+    ax.set_xticklabels([f"{int(v)}" for v in tick_vals], fontsize=70, fontweight='bold')
+    ax.set_yticklabels([f"{int(v)}" for v in tick_vals], fontsize=70, fontweight='bold')
     ax.tick_params(
         axis='both',
         which='major',
-        direction='out',  # ticks point outward from plot
-        length=14,        # length of tick lines
-        width=4,          # width of tick lines
-        color='black',    # color of tick lines
-        labelsize=48
+        direction='out',
+        length=14,
+        width=4,
+        color='black',
+        labelsize=70
     )
 
-    ax.set_xlabel('X [m]', fontsize=52, fontweight='bold')
-    ax.set_ylabel('Y [m]', fontsize=52, fontweight='bold')
+    ax.set_xlabel('X [m]', fontsize=70, fontweight='bold')
+    ax.set_ylabel('Y [m]', fontsize=70, fontweight='bold')
 
 
 # --- 1. Define Your Input Data Paths ---
 # You must have these files.
-csv_file = '/home/danino/PycharmProjects/pythonProject/data/Dor_2satellites_overpass.csv'
+csv_file = '/home/danino/PycharmProjects/pythonProject/data/debug.csv'
 #csv_file = '/home/danino/PycharmProjects/pythonProject/data/debug.csv'
 
 #cloud_data_file = '/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_3D/BOMEX_512x512x200_20m_20m_1s_512_0000005200_1_5'  # This is the pkl file you have
 #cloud_data_file= "/wdata_visl/danino/dataset_256x256x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000002000/sample_001.pkl"
-cloud_data_file= '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,reff,lwc,U,V,W)_fixed_to_shdom/0000005920/sample_012.pkl'
+cloud_data_file= '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_beta,U,V,W_fixed/0000005920/sample_012.pkl'
 #cloud_data_file= "/wdata_visl/danino/dataset_512x512x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000002000/sample_000.pkl"
 
 output_vol_file = 'temp/my_cloud.vol'  # A temporary file this script will create
@@ -80,21 +80,21 @@ output_image_dir = '/home/danino/PycharmProjects/pythonProject/data/output'
 os.makedirs('temp', exist_ok=True)
 
 # Define which rows from your CSV to use
-overpass_indices = [9]
+overpass_indices = [14,15]  # Adjust this list based on how many timestamps/satellites you want to render
 
 # --- 2. Set Up the Renderer Parameters ---
 renderer_params = {
     'overpass_csv': csv_file,
     'overpass_indices': overpass_indices,
-    'spp': 512,
-    'g_value': 0,
+    'spp': 8192,
+    'g_value': 0.85,
     'cloud_width': 128,
     'image_res': 256,
     'fov' : 0.25,
     'voxel_res': 0.02,
     'scene_scale': 1000.0,
     'cloud_zrange': [0.0, 4.0],
-    'satellites': 1,
+    'satellites': 2,
     'timestamps': 1,
     'pad_image': False,
     'dynamic_emitter': True,
@@ -177,16 +177,19 @@ else:
             # Create figure for individual PDF
             fig_single, ax_single = plt.subplots(figsize=(12, 12), dpi=150)
             im_single = ax_single.imshow(corrected_data, cmap='gray', extent=extent_m, interpolation='nearest')
-            ax_single.set_title('Render Cloud Image', fontsize=56, fontweight='bold', pad=40)
+            ax_single.set_title('Render Cloud Image', fontsize=70, fontweight='bold', pad=40)
             set_centered_meter_axis(ax_single, H, W, m_per_pixel)
 
             # Add colorbar
             cbar_single = plt.colorbar(im_single, ax=ax_single, fraction=0.046, pad=0.04)
-            cbar_single.ax.tick_params(labelsize=48)
+            cbar_single.ax.tick_params(labelsize=70)
+            for label in cbar_single.ax.get_yticklabels():
+                label.set_fontsize(70)
+                label.set_fontweight('bold')
 
             # Save PDF
-            fig_single.set_size_inches(20, 20)
-            plt.subplots_adjust(left=0.17, right=0.92, top=0.95, bottom=0.08)
+            fig_single.set_size_inches(20, 18)
+            plt.subplots_adjust(left=0.22, right=0.89, top=0.99, bottom=0.01)
             filename = f"render_t{t:02d}_s{s:02d}.pdf"
             filepath = os.path.join(output_image_dir, filename)
             plt.savefig(filepath, dpi=150)
@@ -235,12 +238,15 @@ else:
 
             # Add colorbar
             cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            cbar.ax.tick_params(labelsize=48)
-
-    plt.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.05, hspace=0.3, wspace=0.3)
+            cbar.ax.tick_params(labelsize=70)
+            for label in cbar.ax.get_yticklabels():
+                label.set_fontsize(70)
+                label.set_fontweight('bold')
 
     # Save combined overview as PDF
     overview_path = os.path.join(output_image_dir, "render_overview.pdf")
+    fig.set_size_inches(20, 18)
+    plt.subplots_adjust(left=0.19, right=0.87, top=0.99, bottom=0.01)
     plt.savefig(overview_path, dpi=150)
     print(f"Saved combined overview: {overview_path}")
     plt.close(fig)
@@ -449,4 +455,4 @@ except Exception as e:
 # <-- MODIFIED: Added this section -->
 # --- 10. Show all plots ---
 print("Displaying all plot windows at the same time...")
-plt.show()
+#plt.show()

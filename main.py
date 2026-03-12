@@ -74,9 +74,9 @@ def compute_loss(y_pred, y, mask=None, use_mask=True, dataset_obj=None, unmasked
 
     abs_diff = (y_pred - y).abs()
     # Dynamically determine bin min/max from y ground truth
-    BIN_MIN = -3.30
-    BIN_MAX = 6.73
-    BIN_WIDTH = 0.1
+    BIN_MIN = -7.60
+    BIN_MAX = 8.78
+    BIN_WIDTH = 0.5
     NUM_BINS = int(math.ceil((BIN_MAX - BIN_MIN) / BIN_WIDTH))
 
     # Prepare mask for binning (masked pixels only)
@@ -404,13 +404,13 @@ if __name__ == "__main__":
     WEIGHT_DECAY = 1e-4
 
     BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
-    USE_MASK = "slice_mask"  # True, False, or "slice_mask"
+    USE_MASK = True  # True, False, or "slice_mask"
     USE_ENVELOP_AS_A_INPUT = False  # Whether to feed GT envelope velocity as an extra input channel
     UNMASKED_WEIGHT_FACTOR = 0.9  # Weight multiplier for unmasked areas in slice_mask mode
     TRAIN_AUGMENT = False
-    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_1000m_w.npz"
+    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_2000m_w.npz"
     GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
-    model_name = f"{BACKBONE}_1000m_slice_mask_no_gtenv_mix_loss"
+    model_name = f"{BACKBONE}mit_b1_envelop_mix_loss_best_bin_loss_fix"
 
     # Refiner config
     USE_REFINER = True
@@ -418,6 +418,9 @@ if __name__ == "__main__":
 
     # Bin debug logging
     DEBUG_BINS_ONCE_PER_EPOCH = False  # Set to False to disable bin count logging
+
+    # Checkpoint loading
+    # LOAD_CHECKPOINT = "models/mit_b1_envelop_mix_loss_best_bin_loss.pt" # e.g., 'models/mit_b1_1500m_slice_mask_no_gtenv_mix_loss_best_bin_loss.pt' or None
 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -519,7 +522,7 @@ if __name__ == "__main__":
         print("[INFO] Initializing Pre-trained MiT-B3 Model...")
         model = PretrainedTemporalUNetMitB3(
             out_channels=1,
-            lstm_layers=2,
+            lstm_layers=1,
             freeze_encoder=True,
             in_channels=in_channels,
             use_refiner=False,  # Stage 1: No refiner
@@ -527,6 +530,18 @@ if __name__ == "__main__":
         ).to(device)
     else:
         raise ValueError(f"Unsupported BACKBONE: {BACKBONE}")
+
+    # Load checkpoint if provided
+    if LOAD_CHECKPOINT is not None:
+        print(f"[INFO] Loading model weights from {LOAD_CHECKPOINT}")
+        checkpoint = torch.load(LOAD_CHECKPOINT, map_location=device)
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        elif 'model_state' in checkpoint:
+            model.load_state_dict(checkpoint['model_state'], strict=False)
+        else:
+            model.load_state_dict(checkpoint, strict=False)
+        print("[INFO] Model weights loaded.")
 
     refiner_enabled = False  # Start with no refiner
     current_stage = 1

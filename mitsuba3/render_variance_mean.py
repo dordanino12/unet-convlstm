@@ -19,9 +19,21 @@ output_vol_file = 'temp/my_cloud.vol'
 os.makedirs('temp', exist_ok=True)
 
 # --- Render Settings ---
-SPP = 16384
+SPP = 8192
 NUM_RUNS = 10
 SEED_BASE = 42
+
+# --- Plot Settings ---
+# Options: 'all' or 'mc_poisson'
+PLOT_MODE = 'mc_poisson'
+TITLE_FONT_SIZE = 20
+LABEL_FONT_SIZE = 18
+TICK_FONT_SIZE = 14
+LEGEND_FONT_SIZE = 14
+FIGURE_SIZE = (8, 5)
+SAVE_PLOT = True
+PLOT_OUTPUT_PATH = 'temp/variance_mean_plot.pdf'
+PLOT_DPI = 300
 
 renderer_params = {
     'overpass_csv': csv_file,
@@ -99,25 +111,41 @@ poisson_var = flat_mean
 camera_var = flat_mean + (B_TAU * delta_t) + READ_NOISE_STD + K_QUANT
 
 # --- Visualization ---
-plt.figure(figsize=(12, 7))
+plt.figure(figsize=FIGURE_SIZE)
 
 # Sort indices by mean for a cleaner line plot or use a scatter plot
 sort_idx = np.argsort(flat_mean)
 sorted_mean = flat_mean[sort_idx]
 sorted_mc_var = flat_mc_var[sort_idx]
 
-plt.scatter(flat_mean, flat_mc_var, alpha=0.3, s=1, label='Monte Carlo Variance (Render)', color='gray')
+plt.scatter(flat_mean, flat_mc_var, alpha=0.3, s=1, label='Monte Carlo Variance (Render)', color='gray',rasterized=True)
 plt.plot(sorted_mean, sorted_mean, 'r-', linewidth=2, label='Poisson Noise Model (Var = Mean)')
-plt.plot(sorted_mean, camera_var[sort_idx], 'b--', linewidth=2, label='Full Camera Noise Model')
 
-plt.title(f'Variance Comparison: Monte Carlo vs. Camera Noise (SPP={SPP})')
-plt.xlabel('Mean Signal (Electrons - $u_e$)')
-plt.ylabel('Variance ($\sigma^2$)')
+if PLOT_MODE == 'all':
+    plt.plot(sorted_mean, camera_var[sort_idx], 'b--', linewidth=2, label='Full Camera Noise Model')
+
+if PLOT_MODE == 'mc_poisson':
+    title_text = f'Noise Comparison'
+else:
+    title_text = f'Noise Comparison'
+
+plt.title(title_text, fontsize=TITLE_FONT_SIZE)
+plt.xlabel('Mean Signal (Electrons - $u_e$)', fontsize=LABEL_FONT_SIZE)
+plt.ylabel('Variance ($\sigma^2$)', fontsize=LABEL_FONT_SIZE)
 plt.ylim(bottom=-100, top=80000)
+plt.yticks([10000, 40000, 70000], fontsize=TICK_FONT_SIZE)
 #plt.yscale('log')  # Log scale helps see the MC noise clearly
 #plt.xscale('log')
-plt.legend()
+plt.xticks(fontsize=TICK_FONT_SIZE)
 plt.grid(False)
 
 plt.tight_layout()
+
+if SAVE_PLOT:
+    output_dir = os.path.dirname(PLOT_OUTPUT_PATH)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(PLOT_OUTPUT_PATH, format='pdf', bbox_inches='tight')
+    print(f"Saved plot to: {PLOT_OUTPUT_PATH}")
+
 plt.show()

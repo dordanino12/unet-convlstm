@@ -156,7 +156,7 @@ def check_physics_full_breakdown(pkl_path, voxel_res=20.0, save_dir=None):
 
 if __name__ == "__main__":
     # --- INPUT ---
-    file_path = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000015040/sample_022.pkl"
+    file_path = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000005040/sample_022.pkl"
     
     # --- OUTPUT ---
     output_folder = "/home/danino/PycharmProjects/pythonProject/data/output/"
