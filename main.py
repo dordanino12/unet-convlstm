@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import copy
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 import numpy as np
 import torch.fft
@@ -408,9 +408,11 @@ if __name__ == "__main__":
     USE_ENVELOP_AS_A_INPUT = False  # Whether to feed GT envelope velocity as an extra input channel
     UNMASKED_WEIGHT_FACTOR = 0.9  # Weight multiplier for unmasked areas in slice_mask mode
     TRAIN_AUGMENT = False
-    NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_2000m_w.npz"
-    GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
-    model_name = f"{BACKBONE}mit_b1_envelop_mix_loss_best_bin_loss_fix"
+    NPZ_TRAIN_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_envelop_w_fix_leak_train_w.npz"
+    NPZ_VAL_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_envelop_w_fix_leak_val_w.npz"
+    NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_envelop_w_fix_leak_test_w.npz"
+    GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_envelop_w.npz"
+    model_name = f"{BACKBONE}_envelop_data_leakag_fix"
 
     # Refiner config
     USE_REFINER = True
@@ -420,63 +422,60 @@ if __name__ == "__main__":
     DEBUG_BINS_ONCE_PER_EPOCH = False  # Set to False to disable bin count logging
 
     # Checkpoint loading
-    # LOAD_CHECKPOINT = "models/mit_b1_envelop_mix_loss_best_bin_loss.pt" # e.g., 'models/mit_b1_1500m_slice_mask_no_gtenv_mix_loss_best_bin_loss.pt' or None
-
+    LOAD_CHECKPOINT = "models/mit_b1_envelop_mix_loss_best_bin_loss.pt" # e.g., 'models/mit_b1_1500m_slice_mask_no_gtenv_mix_loss_best_bin_loss.pt' or None
+    LOAD_CHECKPOINT = None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Running on: {device}")
 
     # --- 2. Data Loading ---
-    if not os.path.exists(NPZ_PATH):
-        print(f"ERROR: Dataset not found at {NPZ_PATH}")
+    required_npz_paths = [NPZ_TRAIN_PATH, NPZ_VAL_PATH, NPZ_TEST_PATH]
+    missing_paths = [p for p in required_npz_paths if not os.path.exists(p)]
+    if missing_paths:
+        print("ERROR: Missing required split datasets:")
+        for p in missing_paths:
+            print(f"  - {p}")
         exit(1)
 
-    dataset = NPZSequenceDataset(
-        NPZ_PATH,
-        use_gt_envelope_as_input=USE_ENVELOP_AS_A_INPUT,
-        gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
-        augment=False
-    )
     train_dataset = NPZSequenceDataset(
-        NPZ_PATH,
+        NPZ_TRAIN_PATH,
         use_gt_envelope_as_input=USE_ENVELOP_AS_A_INPUT,
         gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
         augment=TRAIN_AUGMENT,
         augment_repeats=3,
         deterministic_aug=True
     )
-    print(f"Dataset length: {len(dataset)}")
-    _, in_channels, _, _ = dataset[0][0].shape
+    val_dataset = NPZSequenceDataset(
+        NPZ_VAL_PATH,
+        use_gt_envelope_as_input=USE_ENVELOP_AS_A_INPUT,
+        gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
+        augment=False
+    )
+    test_dataset = NPZSequenceDataset(
+        NPZ_TEST_PATH,
+        use_gt_envelope_as_input=USE_ENVELOP_AS_A_INPUT,
+        gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
+        augment=False
+    )
 
-    torch.manual_seed(42)  # Ensure reproducibility
-    g = torch.Generator().manual_seed(42)
+    # Force train-derived normalization for val/test for consistent denormalized metrics.
+    shared_scale = train_dataset.scale
+    shared_norm_const = train_dataset.norm_const
+    val_dataset.scale = shared_scale
+    val_dataset.norm_const = shared_norm_const
+    test_dataset.scale = shared_scale
+    test_dataset.norm_const = shared_norm_const
 
-    n_total = len(dataset)
-    n_train = int(0.8 * n_total)
-    n_val = int(0.1 * n_total)
-    n_test = n_total - n_train - n_val
+    train_ds = train_dataset
+    val_ds = val_dataset
+    test_ds = test_dataset
 
-    print(f"Train sequences (base): {n_train}")
-
-    perm = torch.randperm(n_total, generator=g).tolist()
-    base_train_idx = perm[:n_train]
-    val_idx = perm[n_train:n_train + n_val]
-    test_idx = perm[n_train + n_val:]
-
-    if train_dataset.augment and train_dataset.deterministic_aug:
-        train_idx = []
-        for r in range(train_dataset.augment_repeats):
-            train_idx.extend([i + r * n_total for i in base_train_idx])
-    else:
-        train_idx = list(base_train_idx)
-
-    train_ds = Subset(train_dataset, train_idx)
-    val_ds = Subset(dataset, val_idx)
-    test_ds = Subset(dataset, test_idx)
-
+    print(f"Train sequences (base): {train_dataset.N}")
     print(f"Train sequences (augmented): {len(train_ds)}")
     print(f"Val sequences: {len(val_ds)}")
     print(f"Test sequences: {len(test_ds)}")
+    print(f"[INFO] Shared normalization from train split: norm_const={shared_norm_const:.4f}, scale={shared_scale:.4f}")
+    _, in_channels, _, _ = train_ds[0][0].shape
 
     def make_loaders(batch_size):
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=True)
@@ -687,7 +686,7 @@ if __name__ == "__main__":
             train_loader,
             optimizer,
             device,
-            dataset,
+            train_dataset,
             scaler,
             use_mask=USE_MASK,
             unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR,
@@ -711,7 +710,7 @@ if __name__ == "__main__":
             model,
             val_loader,
             device,
-            dataset,
+            train_dataset,
             use_mask=USE_MASK,
             unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR,
             loss_mode=eval_loss_mode,
@@ -755,6 +754,6 @@ if __name__ == "__main__":
 
     print(f"Training complete. Best Validation Loss: {final_best_val_loss:.6f}")
     test_loss, test_mae, test_rmse, test_me = evaluate(
-        model, test_loader, device, dataset, use_mask=USE_MASK, unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR
+        model, test_loader, device, train_dataset, use_mask=USE_MASK, unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR
     )
     print(f"Test:  Loss={test_loss:.4f} | MAE={test_mae:.4f} | RMSE={test_rmse:.4f} | ME={test_me:.4f}")
