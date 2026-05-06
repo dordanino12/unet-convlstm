@@ -67,16 +67,18 @@ def exponent_loss(y_pred, y, mask=None, use_mask=True):
     total_loss = weighted_exp + 0.005 * grad_loss
     return total_loss
 
-# -----------------------------------------------------
+#------------
 # Loss Function: Weighted L1 + Gradient Loss
 # -----------------------------------------------------
-def compute_loss(y_pred, y, mask=None, use_mask=True, dataset_obj=None, unmasked_weight_factor=0.1, debug_bins=False):
+def compute_loss(y_pred, y, mask=None, use_mask=True, dataset_obj=None, unmasked_weight_factor=0.1, debug_bins=False, bin_min=None, bin_max=None):
 
     abs_diff = (y_pred - y).abs()
-    # Dynamically determine bin min/max from y ground truth
-    BIN_MIN = -7.60
-    BIN_MAX = 8.78
-    BIN_WIDTH = 0.5
+    # Dynamically determine bin min/max from training data
+    if bin_min is None or bin_max is None:
+        raise ValueError("bin_min and bin_max must be provided from the training dataset")
+    BIN_MIN = float(bin_min)
+    BIN_MAX = float(bin_max)
+    BIN_WIDTH = 0.1
     NUM_BINS = int(math.ceil((BIN_MAX - BIN_MIN) / BIN_WIDTH))
 
     # Prepare mask for binning (masked pixels only)
@@ -209,7 +211,7 @@ def compute_loss(y_pred, y, mask=None, use_mask=True, dataset_obj=None, unmasked
 # -----------------------------------------------------
 # Training Loop
 # -----------------------------------------------------
-def train_one_epoch(model, loader, optimizer, device, dataset_obj, scaler, use_mask=True, unmasked_weight_factor=0.1, debug_bins_once=False, loss_mode='bins', loss_interp=0.0):
+def train_one_epoch(model, loader, optimizer, device, dataset_obj, scaler, use_mask=True, unmasked_weight_factor=0.1, debug_bins_once=False, loss_mode='bins', loss_interp=0.0, bin_min=None, bin_max=None):
     model.train()
     total_loss, n = 0.0, 0
 
@@ -246,7 +248,9 @@ def train_one_epoch(model, loader, optimizer, device, dataset_obj, scaler, use_m
                 use_mask,
                 dataset_obj,
                 unmasked_weight_factor,
-                debug_bins=debug_bins
+                debug_bins=debug_bins,
+                bin_min=bin_min,
+                bin_max=bin_max
             )
         elif loss_mode == 'interp':
             # Interpolate between exponent and bins loss
@@ -258,7 +262,9 @@ def train_one_epoch(model, loader, optimizer, device, dataset_obj, scaler, use_m
                 use_mask,
                 dataset_obj,
                 unmasked_weight_factor,
-                debug_bins=debug_bins
+                debug_bins=debug_bins,
+                bin_min=bin_min,
+                bin_max=bin_max
             )
             loss = (1 - loss_interp) * loss_exp + loss_interp * loss_bins
         else:
@@ -313,7 +319,7 @@ def train_one_epoch(model, loader, optimizer, device, dataset_obj, scaler, use_m
 # Evaluation Loop
 # -----------------------------------------------------
 @torch.no_grad()
-def evaluate(model, loader, device, dataset_obj, use_mask=True, unmasked_weight_factor=0.1, loss_mode='bins', loss_interp=0.0):
+def evaluate(model, loader, device, dataset_obj, use_mask=True, unmasked_weight_factor=0.1, loss_mode='bins', loss_interp=0.0, bin_min=None, bin_max=None):
     model.eval()
     total_loss, n = 0.0, 0
     
@@ -337,10 +343,10 @@ def evaluate(model, loader, device, dataset_obj, use_mask=True, unmasked_weight_
         if loss_mode == 'exponent':
             loss = exponent_loss(y_pred, y, mask, use_mask)
         elif loss_mode == 'bins':
-            loss = compute_loss(y_pred, y, mask, use_mask, dataset_obj, unmasked_weight_factor)
+            loss = compute_loss(y_pred, y, mask, use_mask, dataset_obj, unmasked_weight_factor, bin_min=bin_min, bin_max=bin_max)
         elif loss_mode == 'interp':
             loss_exp = exponent_loss(y_pred, y, mask, use_mask)
-            loss_bins = compute_loss(y_pred, y, mask, use_mask, dataset_obj, unmasked_weight_factor)
+            loss_bins = compute_loss(y_pred, y, mask, use_mask, dataset_obj, unmasked_weight_factor, bin_min=bin_min, bin_max=bin_max)
             loss = (1 - loss_interp) * loss_exp + loss_interp * loss_bins
         else:
             raise ValueError(f"Unknown loss_mode: {loss_mode}")
@@ -408,9 +414,9 @@ if __name__ == "__main__":
     USE_ENVELOP_AS_A_INPUT = False  # Whether to feed GT envelope velocity as an extra input channel
     UNMASKED_WEIGHT_FACTOR = 0.9  # Weight multiplier for unmasked areas in slice_mask mode
     TRAIN_AUGMENT = False
-    NPZ_TRAIN_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_envelop_w_fix_leak_train_w.npz"
-    NPZ_VAL_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_envelop_w_fix_leak_val_w.npz"
-    NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_envelop_w_fix_leak_test_w.npz"
+    NPZ_TRAIN_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_train_w.npz"
+    NPZ_VAL_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_val_w.npz"
+    NPZ_TEST_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_test_w.npz"
     GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_envelop_w.npz"
     model_name = f"{BACKBONE}_envelop_data_leakag_fix"
 
@@ -422,7 +428,6 @@ if __name__ == "__main__":
     DEBUG_BINS_ONCE_PER_EPOCH = False  # Set to False to disable bin count logging
 
     # Checkpoint loading
-    LOAD_CHECKPOINT = "models/mit_b1_envelop_mix_loss_best_bin_loss.pt" # e.g., 'models/mit_b1_1500m_slice_mask_no_gtenv_mix_loss_best_bin_loss.pt' or None
     LOAD_CHECKPOINT = None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -465,6 +470,11 @@ if __name__ == "__main__":
     val_dataset.norm_const = shared_norm_const
     test_dataset.scale = shared_scale
     test_dataset.norm_const = shared_norm_const
+
+    y_raw = np.asarray(train_dataset.Y, dtype=np.float32)
+    bin_min = float(np.min(y_raw))
+    bin_max = float(np.max(y_raw))
+    print(f"[INFO] Derived bin bounds from training data: BIN_MIN={bin_min:.4f}, BIN_MAX={bin_max:.4f}")
 
     train_ds = train_dataset
     val_ds = val_dataset
@@ -693,6 +703,8 @@ if __name__ == "__main__":
             debug_bins_once=DEBUG_BINS_ONCE_PER_EPOCH,
             loss_mode=loss_mode,
             loss_interp=loss_interp,
+            bin_min=bin_min,
+            bin_max=bin_max,
         )
 
         # --- Loss mode selection for evaluation ---
@@ -714,7 +726,9 @@ if __name__ == "__main__":
             use_mask=USE_MASK,
             unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR,
             loss_mode=eval_loss_mode,
-            loss_interp=eval_loss_interp
+            loss_interp=eval_loss_interp,
+            bin_min=bin_min,
+            bin_max=bin_max
         )
 
         # Update scheduler based on Val Loss
@@ -754,6 +768,6 @@ if __name__ == "__main__":
 
     print(f"Training complete. Best Validation Loss: {final_best_val_loss:.6f}")
     test_loss, test_mae, test_rmse, test_me = evaluate(
-        model, test_loader, device, train_dataset, use_mask=USE_MASK, unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR
+        model, test_loader, device, train_dataset, use_mask=USE_MASK, unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR, bin_min=bin_min, bin_max=bin_max
     )
     print(f"Test:  Loss={test_loss:.4f} | MAE={test_mae:.4f} | RMSE={test_rmse:.4f} | ME={test_me:.4f}")
