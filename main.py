@@ -418,7 +418,8 @@ if __name__ == "__main__":
     NPZ_VAL_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_val_w.npz"
     NPZ_TEST_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_test_w.npz"
     GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_envelop_w.npz"
-    model_name = f"{BACKBONE}_envelop_data_leakag_fix"
+    model_name = f"{BACKBONE}_envelop_data_leakag_fix_no_conv_lstm"
+    USE_CONV_LSTM = False
 
     # Refiner config
     USE_REFINER = True
@@ -501,9 +502,10 @@ if __name__ == "__main__":
         print("[INFO] Initializing Pre-trained ResNet18 Model...")
         model = PretrainedTemporalUNet(
             out_channels=1,
-            lstm_layers=1,
+            lstm_layers=1 if USE_CONV_LSTM else 0,
             freeze_encoder=True,
             in_channels=in_channels,
+            use_conv_lstm=USE_CONV_LSTM,
             use_refiner=False,  # Stage 1: No refiner
             refiner_hidden_channels=REFINER_HIDDEN_CHANNELS
         ).to(device)
@@ -511,9 +513,10 @@ if __name__ == "__main__":
         print("[INFO] Initializing Pre-trained MiT-B1 Model...")
         model = PretrainedTemporalUNetMitB1(
             out_channels=1,
-            lstm_layers=1,
+            lstm_layers=1 if USE_CONV_LSTM else 0,
             freeze_encoder=True,
             in_channels=in_channels,
+            use_conv_lstm=USE_CONV_LSTM,
             use_refiner=False,  # Stage 1: No refiner
             refiner_hidden_channels=REFINER_HIDDEN_CHANNELS
         ).to(device)
@@ -521,9 +524,10 @@ if __name__ == "__main__":
         print("[INFO] Initializing Pre-trained MiT-B2 Model...")
         model = PretrainedTemporalUNetMitB2(
             out_channels=1,
-            lstm_layers=1,
+            lstm_layers=1 if USE_CONV_LSTM else 0,
             freeze_encoder=True,
             in_channels=in_channels,
+            use_conv_lstm=USE_CONV_LSTM,
             use_refiner=False,  # Stage 1: No refiner
             refiner_hidden_channels=REFINER_HIDDEN_CHANNELS
         ).to(device)
@@ -531,9 +535,10 @@ if __name__ == "__main__":
         print("[INFO] Initializing Pre-trained MiT-B3 Model...")
         model = PretrainedTemporalUNetMitB3(
             out_channels=1,
-            lstm_layers=1,
+            lstm_layers=1 if USE_CONV_LSTM else 0,
             freeze_encoder=True,
             in_channels=in_channels,
+            use_conv_lstm=USE_CONV_LSTM,
             use_refiner=False,  # Stage 1: No refiner
             refiner_hidden_channels=REFINER_HIDDEN_CHANNELS
         ).to(device)

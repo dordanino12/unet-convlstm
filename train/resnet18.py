@@ -101,11 +101,12 @@ class RefinerHead(nn.Module):
 # -----------------------------------------------------
 class PretrainedTemporalUNet(nn.Module):
     def __init__(self, out_channels=1, lstm_layers=1, freeze_encoder=True, in_channels=2, dropout_p=0.3,
-                 use_refiner=False, refiner_hidden_channels=32):
+                 use_conv_lstm=True, use_refiner=False, refiner_hidden_channels=32):
         super().__init__()
         self.out_channels = out_channels
         self.refiner_hidden_channels = refiner_hidden_channels
         self.in_channels = in_channels
+        self.use_conv_lstm = use_conv_lstm and lstm_layers > 0
 
         # 1. Create base U-Net based on ResNet18
         # weights="imagenet" -> Loads pre-trained knowledge
@@ -137,23 +138,28 @@ class PretrainedTemporalUNet(nn.Module):
                 param.requires_grad = False
             print("[INFO] ResNet Encoder is FROZEN.")
 
-        # 4. Add ConvLSTM at the bottleneck
-        # In ResNet18, the final output (stage 5) has 512 channels
-        self.lstm_input_dim = 512
-        self.proj_channels = 128  # Reduce to 128 channels for efficiency
+        if self.use_conv_lstm:
+            # 4. Add ConvLSTM at the bottleneck
+            # In ResNet18, the final output (stage 5) has 512 channels
+            self.lstm_input_dim = 512
+            self.proj_channels = 128  # Reduce to 128 channels for efficiency
 
-        # Bottleneck projection and expansion layers
-        self.bottleneck_proj = nn.Conv2d(self.lstm_input_dim, self.proj_channels, kernel_size=1, bias=False)
-        self.bottleneck_expand = nn.Conv2d(self.proj_channels, self.lstm_input_dim, kernel_size=1, bias=False)
+            # Bottleneck projection and expansion layers
+            self.bottleneck_proj = nn.Conv2d(self.lstm_input_dim, self.proj_channels, kernel_size=1, bias=False)
+            self.bottleneck_expand = nn.Conv2d(self.proj_channels, self.lstm_input_dim, kernel_size=1, bias=False)
 
-        self.lstm = ConvLSTM(
-            input_dim=self.proj_channels,  # Now operates on reduced dimension
-            hidden_dim=self.proj_channels, # Keep the same width
-            num_layers=lstm_layers,
-            kernel_size=3
-        )
-        # Skip connections will be used as-is without ConvLSTM processing
-        # Only the bottleneck will have temporal processing via ConvLSTM
+            self.lstm = ConvLSTM(
+                input_dim=self.proj_channels,  # Now operates on reduced dimension
+                hidden_dim=self.proj_channels, # Keep the same width
+                num_layers=lstm_layers,
+                kernel_size=3
+            )
+        else:
+            self.lstm_input_dim = None
+            self.proj_channels = None
+            self.bottleneck_proj = None
+            self.bottleneck_expand = None
+            self.lstm = None
 
     def enable_refiner(self, hidden_channels=None):
         if hidden_channels is None:
@@ -186,34 +192,37 @@ class PretrainedTemporalUNet(nn.Module):
         bottleneck = features[-1] # Shape: [B*T, 512, H/32, W/32]
         
         # --- B. TEMPORAL PROCESSING (LSTM) ---
-        # Project bottleneck to lower dimension
-        # Shape: [B*T, 128, H/32, W/32]
-        bottleneck_proj = self.bottleneck_proj(bottleneck)
+        if self.use_conv_lstm:
+            # Project bottleneck to lower dimension
+            # Shape: [B*T, 128, H/32, W/32]
+            bottleneck_proj = self.bottleneck_proj(bottleneck)
 
-        # Reshape back to time dimension so the LSTM understands the sequence
-        # Shape: [B, T, 128, H/32, W/32]
-        bottleneck_seq = bottleneck_proj.view(B, T, -1, bottleneck_proj.shape[2], bottleneck_proj.shape[3])
+            # Reshape back to time dimension so the LSTM understands the sequence
+            # Shape: [B, T, 128, H/32, W/32]
+            bottleneck_seq = bottleneck_proj.view(B, T, -1, bottleneck_proj.shape[2], bottleneck_proj.shape[3])
 
-        # Your ConvLSTM expects a list of tensors
-        lstm_in_list = [bottleneck_seq[:, t] for t in range(T)]
-        
-        # Run the LSTM
-        lstm_out_list, _ = self.lstm(lstm_in_list)
-        
-        # Stack back into a single tensor
-        lstm_out_stacked = torch.stack(lstm_out_list, dim=1) # [B, T, 128, H/32, W/32]
+            # Your ConvLSTM expects a list of tensors
+            lstm_in_list = [bottleneck_seq[:, t] for t in range(T)]
 
-        # --- C. DECODER (Frame by Frame) ---
-        # Flatten again to [B*T, ...] to enter the Decoder
-        lstm_out_flat = lstm_out_stacked.view(B * T, -1, bottleneck_proj.shape[2], bottleneck_proj.shape[3])
+            # Run the LSTM
+            lstm_out_list, _ = self.lstm(lstm_in_list)
 
-        # Expand back to original bottleneck dimension
-        # Shape: [B*T, 512, H/32, W/32]
-        bottleneck_expanded = self.bottleneck_expand(lstm_out_flat)
+            # Stack back into a single tensor
+            lstm_out_stacked = torch.stack(lstm_out_list, dim=1) # [B, T, 128, H/32, W/32]
 
-        # The Trick: Replace the last feature in the list (which was static)
-        # with the LSTM output (which is dynamic)
-        features[-1] = self.dropout(bottleneck_expanded)
+            # --- C. DECODER (Frame by Frame) ---
+            # Flatten again to [B*T, ...] to enter the Decoder
+            lstm_out_flat = lstm_out_stacked.view(B * T, -1, bottleneck_proj.shape[2], bottleneck_proj.shape[3])
+
+            # Expand back to original bottleneck dimension
+            # Shape: [B*T, 512, H/32, W/32]
+            bottleneck_expanded = self.bottleneck_expand(lstm_out_flat)
+
+            # The Trick: Replace the last feature in the list (which was static)
+            # with the LSTM output (which is dynamic)
+            features[-1] = self.dropout(bottleneck_expanded)
+        else:
+            features[-1] = self.dropout(features[-1])
 
         # Decode (skip connections are used as-is without temporal processing)
         decoder_out = self.decoder(*features)
@@ -234,11 +243,12 @@ class PretrainedTemporalUNet(nn.Module):
 # -----------------------------------------------------
 class PretrainedTemporalUNetMitB3(nn.Module):
     def __init__(self, out_channels=1, lstm_layers=1, freeze_encoder=True, in_channels=2, dropout_p=0.2,
-                 use_refiner=False, refiner_hidden_channels=32):
+                 use_conv_lstm=True, use_refiner=False, refiner_hidden_channels=32):
         super().__init__()
         self.out_channels = out_channels
         self.refiner_hidden_channels = refiner_hidden_channels
         self.in_channels = in_channels
+        self.use_conv_lstm = use_conv_lstm and lstm_layers > 0
         if in_channels != 3:
             self.input_adapter = nn.Conv2d(in_channels, 3, kernel_size=1, bias=False)
         else:
@@ -278,24 +288,31 @@ class PretrainedTemporalUNetMitB3(nn.Module):
         if encoder_out_channels is None:
             raise RuntimeError("MiT-B3 encoder channels are unavailable.")
 
-        self.lstm_input_dim = encoder_out_channels[-1]
-        self.lstm = ConvLSTM(
-            input_dim=self.lstm_input_dim,
-            hidden_dim=self.lstm_input_dim,
-            num_layers=lstm_layers,
-            kernel_size=3
-        )
+        if self.use_conv_lstm:
+            self.lstm_input_dim = encoder_out_channels[-1]
+            self.lstm = ConvLSTM(
+                input_dim=self.lstm_input_dim,
+                hidden_dim=self.lstm_input_dim,
+                num_layers=lstm_layers,
+                kernel_size=3
+            )
 
-        skip_channels = encoder_out_channels[:-1]
-        self.skip_channels = list(skip_channels)
-        lstm_modules = []
-        for ch in skip_channels:
-            if ch <= 0:
-                lstm_modules.append(None)
-            else:
-                lstm_modules.append(ConvLSTM(input_dim=ch, hidden_dim=ch, num_layers=lstm_layers, kernel_size=3))
-        self.lstm_skips = nn.ModuleList([m for m in lstm_modules if m is not None])
-        self._lstm_skip_map = [m is not None for m in lstm_modules]
+            skip_channels = encoder_out_channels[:-1]
+            self.skip_channels = list(skip_channels)
+            lstm_modules = []
+            for ch in skip_channels:
+                if ch <= 0:
+                    lstm_modules.append(None)
+                else:
+                    lstm_modules.append(ConvLSTM(input_dim=ch, hidden_dim=ch, num_layers=lstm_layers, kernel_size=3))
+            self.lstm_skips = nn.ModuleList([m for m in lstm_modules if m is not None])
+            self._lstm_skip_map = [m is not None for m in lstm_modules]
+        else:
+            self.lstm_input_dim = None
+            self.lstm = None
+            self.skip_channels = list(encoder_out_channels[:-1])
+            self.lstm_skips = nn.ModuleList()
+            self._lstm_skip_map = [False for _ in self.skip_channels]
 
     def enable_refiner(self, hidden_channels=None):
         if hidden_channels is None:
@@ -316,29 +333,32 @@ class PretrainedTemporalUNetMitB3(nn.Module):
             x_flat = self.input_adapter(x_flat)
         features = self.encoder(x_flat)
 
-        bottleneck = features[-1]
-        bottleneck_seq = bottleneck.view(B, T, -1, bottleneck.shape[2], bottleneck.shape[3])
-        lstm_in_list = [bottleneck_seq[:, t] for t in range(T)]
-        lstm_out_list, _ = self.lstm(lstm_in_list)
-        lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
-        lstm_out_flat = lstm_out_stacked.view(B * T, -1, bottleneck.shape[2], bottleneck.shape[3])
-        features[-1] = self.dropout(lstm_out_flat)
-
-        lstm_idx = 0
-        for i, use_lstm in enumerate(self._lstm_skip_map):
-            if not use_lstm:
-                continue
-            feat = features[i]
-            Ck = feat.shape[1]
-            if Ck == 0:
-                continue
-            hk, wk = feat.shape[2], feat.shape[3]
-            feat_seq = feat.view(B, T, Ck, hk, wk)
-            lstm_in = [feat_seq[:, t] for t in range(T)]
-            lstm_out_list, _ = self.lstm_skips[lstm_idx](lstm_in)
+        if self.use_conv_lstm:
+            bottleneck = features[-1]
+            bottleneck_seq = bottleneck.view(B, T, -1, bottleneck.shape[2], bottleneck.shape[3])
+            lstm_in_list = [bottleneck_seq[:, t] for t in range(T)]
+            lstm_out_list, _ = self.lstm(lstm_in_list)
             lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
-            features[i] = self.dropout(lstm_out_stacked.view(B * T, Ck, hk, wk))
-            lstm_idx += 1
+            lstm_out_flat = lstm_out_stacked.view(B * T, -1, bottleneck.shape[2], bottleneck.shape[3])
+            features[-1] = self.dropout(lstm_out_flat)
+
+            lstm_idx = 0
+            for i, use_lstm in enumerate(self._lstm_skip_map):
+                if not use_lstm:
+                    continue
+                feat = features[i]
+                Ck = feat.shape[1]
+                if Ck == 0:
+                    continue
+                hk, wk = feat.shape[2], feat.shape[3]
+                feat_seq = feat.view(B, T, Ck, hk, wk)
+                lstm_in = [feat_seq[:, t] for t in range(T)]
+                lstm_out_list, _ = self.lstm_skips[lstm_idx](lstm_in)
+                lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
+                features[i] = self.dropout(lstm_out_stacked.view(B * T, Ck, hk, wk))
+                lstm_idx += 1
+        else:
+            features[-1] = self.dropout(features[-1])
 
         decoder_out = self.decoder(*features)
         output_flat = self.head(self.dropout(decoder_out))
@@ -354,11 +374,12 @@ class PretrainedTemporalUNetMitB3(nn.Module):
 # -----------------------------------------------------
 class PretrainedTemporalUNetMitB2(nn.Module):
     def __init__(self, out_channels=1, lstm_layers=1, freeze_encoder=True, in_channels=2, dropout_p=0.2,
-                 use_refiner=False, refiner_hidden_channels=32):
+                 use_conv_lstm=True, use_refiner=False, refiner_hidden_channels=32):
         super().__init__()
         self.out_channels = out_channels
         self.refiner_hidden_channels = refiner_hidden_channels
         self.in_channels = in_channels
+        self.use_conv_lstm = use_conv_lstm and lstm_layers > 0
         if in_channels != 3:
             self.input_adapter = nn.Conv2d(in_channels, 3, kernel_size=1, bias=False)
         else:
@@ -398,25 +419,32 @@ class PretrainedTemporalUNetMitB2(nn.Module):
         if encoder_out_channels is None:
             raise RuntimeError("MiT-B2 encoder channels are unavailable.")
 
-        bottleneck_in_channels = encoder_out_channels[-1]
-        self.lstm_input_dim = bottleneck_in_channels
-        self.lstm = ConvLSTM(
-            input_dim=self.lstm_input_dim,
-            hidden_dim=self.lstm_input_dim,
-            num_layers=lstm_layers,
-            kernel_size=3
-        )
+        if self.use_conv_lstm:
+            bottleneck_in_channels = encoder_out_channels[-1]
+            self.lstm_input_dim = bottleneck_in_channels
+            self.lstm = ConvLSTM(
+                input_dim=self.lstm_input_dim,
+                hidden_dim=self.lstm_input_dim,
+                num_layers=lstm_layers,
+                kernel_size=3
+            )
 
-        skip_channels = encoder_out_channels[:-1]
-        self.skip_channels = list(skip_channels)
-        lstm_modules = []
-        for ch in skip_channels:
-            if ch <= 0:
-                lstm_modules.append(None)
-            else:
-                lstm_modules.append(ConvLSTM(input_dim=ch, hidden_dim=ch, num_layers=lstm_layers, kernel_size=3))
-        self.lstm_skips = nn.ModuleList([m for m in lstm_modules if m is not None])
-        self._lstm_skip_map = [m is not None for m in lstm_modules]
+            skip_channels = encoder_out_channels[:-1]
+            self.skip_channels = list(skip_channels)
+            lstm_modules = []
+            for ch in skip_channels:
+                if ch <= 0:
+                    lstm_modules.append(None)
+                else:
+                    lstm_modules.append(ConvLSTM(input_dim=ch, hidden_dim=ch, num_layers=lstm_layers, kernel_size=3))
+            self.lstm_skips = nn.ModuleList([m for m in lstm_modules if m is not None])
+            self._lstm_skip_map = [m is not None for m in lstm_modules]
+        else:
+            self.lstm_input_dim = None
+            self.lstm = None
+            self.skip_channels = list(encoder_out_channels[:-1])
+            self.lstm_skips = nn.ModuleList()
+            self._lstm_skip_map = [False for _ in self.skip_channels]
 
     def enable_refiner(self, hidden_channels=None):
         if hidden_channels is None:
@@ -437,29 +465,32 @@ class PretrainedTemporalUNetMitB2(nn.Module):
             x_flat = self.input_adapter(x_flat)
         features = self.encoder(x_flat)
 
-        bottleneck = features[-1]
-        bottleneck_seq = bottleneck.view(B, T, -1, bottleneck.shape[2], bottleneck.shape[3])
-        lstm_in_list = [bottleneck_seq[:, t] for t in range(T)]
-        lstm_out_list, _ = self.lstm(lstm_in_list)
-        lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
-        lstm_out_flat = lstm_out_stacked.view(B * T, -1, bottleneck.shape[2], bottleneck.shape[3])
-        features[-1] = self.dropout(lstm_out_flat)
-
-        lstm_idx = 0
-        for i, use_lstm in enumerate(self._lstm_skip_map):
-            if not use_lstm:
-                continue
-            feat = features[i]
-            Ck = feat.shape[1]
-            if Ck == 0:
-                continue
-            hk, wk = feat.shape[2], feat.shape[3]
-            feat_seq = feat.view(B, T, Ck, hk, wk)
-            lstm_in = [feat_seq[:, t] for t in range(T)]
-            lstm_out_list, _ = self.lstm_skips[lstm_idx](lstm_in)
+        if self.use_conv_lstm:
+            bottleneck = features[-1]
+            bottleneck_seq = bottleneck.view(B, T, -1, bottleneck.shape[2], bottleneck.shape[3])
+            lstm_in_list = [bottleneck_seq[:, t] for t in range(T)]
+            lstm_out_list, _ = self.lstm(lstm_in_list)
             lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
-            features[i] = self.dropout(lstm_out_stacked.view(B * T, Ck, hk, wk))
-            lstm_idx += 1
+            lstm_out_flat = lstm_out_stacked.view(B * T, -1, bottleneck.shape[2], bottleneck.shape[3])
+            features[-1] = self.dropout(lstm_out_flat)
+
+            lstm_idx = 0
+            for i, use_lstm in enumerate(self._lstm_skip_map):
+                if not use_lstm:
+                    continue
+                feat = features[i]
+                Ck = feat.shape[1]
+                if Ck == 0:
+                    continue
+                hk, wk = feat.shape[2], feat.shape[3]
+                feat_seq = feat.view(B, T, Ck, hk, wk)
+                lstm_in = [feat_seq[:, t] for t in range(T)]
+                lstm_out_list, _ = self.lstm_skips[lstm_idx](lstm_in)
+                lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
+                features[i] = self.dropout(lstm_out_stacked.view(B * T, Ck, hk, wk))
+                lstm_idx += 1
+        else:
+            features[-1] = self.dropout(features[-1])
 
         decoder_out = self.decoder(*features)
         output_flat = self.head(self.dropout(decoder_out))
@@ -475,11 +506,12 @@ class PretrainedTemporalUNetMitB2(nn.Module):
 # -----------------------------------------------------
 class PretrainedTemporalUNetMitB1(nn.Module):
     def __init__(self, out_channels=1, lstm_layers=1, freeze_encoder=True, in_channels=2, dropout_p=0.3,
-                 proj_channels=64, use_refiner=False, refiner_hidden_channels=32):
+                 proj_channels=64, use_conv_lstm=True, use_refiner=False, refiner_hidden_channels=32):
         super().__init__()
         self.out_channels = out_channels
         self.refiner_hidden_channels = refiner_hidden_channels
         self.in_channels = in_channels
+        self.use_conv_lstm = use_conv_lstm and lstm_layers > 0
         if in_channels != 3:
             self.input_adapter = nn.Conv2d(in_channels, 3, kernel_size=1, bias=False)
         else:
@@ -519,39 +551,50 @@ class PretrainedTemporalUNetMitB1(nn.Module):
         if encoder_out_channels is None:
             raise RuntimeError("MiT-B1 encoder channels are unavailable.")
 
-        bottleneck_in_channels = encoder_out_channels[-1]
-        self.bottleneck_proj = nn.Conv2d(bottleneck_in_channels, proj_channels, kernel_size=1, bias=False)
-        self.bottleneck_expand = nn.Conv2d(proj_channels, bottleneck_in_channels, kernel_size=1, bias=False)
+        if self.use_conv_lstm:
+            bottleneck_in_channels = encoder_out_channels[-1]
+            self.bottleneck_proj = nn.Conv2d(bottleneck_in_channels, proj_channels, kernel_size=1, bias=False)
+            self.bottleneck_expand = nn.Conv2d(proj_channels, bottleneck_in_channels, kernel_size=1, bias=False)
 
-        self.lstm_input_dim = proj_channels
-        self.lstm = ConvLSTM(
-            input_dim=self.lstm_input_dim,
-            hidden_dim=self.lstm_input_dim,
-            num_layers=lstm_layers,
-            kernel_size=3
-        )
+            self.lstm_input_dim = proj_channels
+            self.lstm = ConvLSTM(
+                input_dim=self.lstm_input_dim,
+                hidden_dim=self.lstm_input_dim,
+                num_layers=lstm_layers,
+                kernel_size=3
+            )
 
-        skip_channels = encoder_out_channels[:-1]
-        self.skip_channels = list(skip_channels)
+            skip_channels = encoder_out_channels[:-1]
+            self.skip_channels = list(skip_channels)
 
-        # Create projection layers for each skip connection
-        self.skip_proj_layers = nn.ModuleList()
-        self.skip_expand_layers = nn.ModuleList()
+            # Create projection layers for each skip connection
+            self.skip_proj_layers = nn.ModuleList()
+            self.skip_expand_layers = nn.ModuleList()
 
-        lstm_modules = []
-        for ch in skip_channels:
-            if ch <= 0:
-                lstm_modules.append(None)
-                self.skip_proj_layers.append(nn.Identity())
-                self.skip_expand_layers.append(nn.Identity())
-            else:
-                # Add projection layer for this skip connection
-                self.skip_proj_layers.append(nn.Conv2d(ch, proj_channels, kernel_size=1, bias=False))
-                self.skip_expand_layers.append(nn.Conv2d(proj_channels, ch, kernel_size=1, bias=False))
-                lstm_modules.append(ConvLSTM(input_dim=proj_channels, hidden_dim=proj_channels, num_layers=lstm_layers, kernel_size=3))
+            lstm_modules = []
+            for ch in skip_channels:
+                if ch <= 0:
+                    lstm_modules.append(None)
+                    self.skip_proj_layers.append(nn.Identity())
+                    self.skip_expand_layers.append(nn.Identity())
+                else:
+                    # Add projection layer for this skip connection
+                    self.skip_proj_layers.append(nn.Conv2d(ch, proj_channels, kernel_size=1, bias=False))
+                    self.skip_expand_layers.append(nn.Conv2d(proj_channels, ch, kernel_size=1, bias=False))
+                    lstm_modules.append(ConvLSTM(input_dim=proj_channels, hidden_dim=proj_channels, num_layers=lstm_layers, kernel_size=3))
 
-        self.lstm_skips = nn.ModuleList([m for m in lstm_modules if m is not None])
-        self._lstm_skip_map = [m is not None for m in lstm_modules]
+            self.lstm_skips = nn.ModuleList([m for m in lstm_modules if m is not None])
+            self._lstm_skip_map = [m is not None for m in lstm_modules]
+        else:
+            self.bottleneck_proj = None
+            self.bottleneck_expand = None
+            self.lstm_input_dim = None
+            self.lstm = None
+            self.skip_channels = list(encoder_out_channels[:-1])
+            self.skip_proj_layers = nn.ModuleList([nn.Identity() for _ in self.skip_channels])
+            self.skip_expand_layers = nn.ModuleList([nn.Identity() for _ in self.skip_channels])
+            self.lstm_skips = nn.ModuleList()
+            self._lstm_skip_map = [False for _ in self.skip_channels]
 
     def enable_refiner(self, hidden_channels=None):
         if hidden_channels is None:
@@ -572,43 +615,46 @@ class PretrainedTemporalUNetMitB1(nn.Module):
             x_flat = self.input_adapter(x_flat)
         features = self.encoder(x_flat)
 
-        bottleneck = self.bottleneck_proj(features[-1])
-        bottleneck_seq = bottleneck.view(B, T, -1, bottleneck.shape[2], bottleneck.shape[3])
-        lstm_in_list = [bottleneck_seq[:, t] for t in range(T)]
-        lstm_out_list, _ = self.lstm(lstm_in_list)
-        lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
-        lstm_out_flat = lstm_out_stacked.view(B * T, -1, bottleneck.shape[2], bottleneck.shape[3])
-        bottleneck_restored = self.bottleneck_expand(lstm_out_flat)
-        features[-1] = self.dropout(bottleneck_restored)
-
-        lstm_idx = 0
-        proj_idx = 0
-        for i, use_lstm in enumerate(self._lstm_skip_map):
-            if not use_lstm:
-                proj_idx += 1
-                continue
-            feat = features[i]
-            Ck = feat.shape[1]
-            if Ck == 0:
-                proj_idx += 1
-                continue
-            hk, wk = feat.shape[2], feat.shape[3]
-
-            # Project skip connection
-            feat_proj = self.skip_proj_layers[proj_idx](feat)
-
-            feat_seq = feat_proj.view(B, T, -1, hk, wk)
-            lstm_in = [feat_seq[:, t] for t in range(T)]
-            lstm_out_list, _ = self.lstm_skips[lstm_idx](lstm_in)
+        if self.use_conv_lstm:
+            bottleneck = self.bottleneck_proj(features[-1])
+            bottleneck_seq = bottleneck.view(B, T, -1, bottleneck.shape[2], bottleneck.shape[3])
+            lstm_in_list = [bottleneck_seq[:, t] for t in range(T)]
+            lstm_out_list, _ = self.lstm(lstm_in_list)
             lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
-            lstm_out_flat = lstm_out_stacked.view(B * T, -1, hk, wk)
+            lstm_out_flat = lstm_out_stacked.view(B * T, -1, bottleneck.shape[2], bottleneck.shape[3])
+            bottleneck_restored = self.bottleneck_expand(lstm_out_flat)
+            features[-1] = self.dropout(bottleneck_restored)
 
-            # Expand back to original channels
-            feat_expanded = self.skip_expand_layers[proj_idx](lstm_out_flat)
-            features[i] = self.dropout(feat_expanded)
+            lstm_idx = 0
+            proj_idx = 0
+            for i, use_lstm in enumerate(self._lstm_skip_map):
+                if not use_lstm:
+                    proj_idx += 1
+                    continue
+                feat = features[i]
+                Ck = feat.shape[1]
+                if Ck == 0:
+                    proj_idx += 1
+                    continue
+                hk, wk = feat.shape[2], feat.shape[3]
 
-            lstm_idx += 1
-            proj_idx += 1
+                # Project skip connection
+                feat_proj = self.skip_proj_layers[proj_idx](feat)
+
+                feat_seq = feat_proj.view(B, T, -1, hk, wk)
+                lstm_in = [feat_seq[:, t] for t in range(T)]
+                lstm_out_list, _ = self.lstm_skips[lstm_idx](lstm_in)
+                lstm_out_stacked = torch.stack(lstm_out_list, dim=1)
+                lstm_out_flat = lstm_out_stacked.view(B * T, -1, hk, wk)
+
+                # Expand back to original channels
+                feat_expanded = self.skip_expand_layers[proj_idx](lstm_out_flat)
+                features[i] = self.dropout(feat_expanded)
+
+                lstm_idx += 1
+                proj_idx += 1
+        else:
+            features[-1] = self.dropout(features[-1])
 
         decoder_out = self.decoder(*features)
         output_flat = self.head(self.dropout(decoder_out))

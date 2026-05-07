@@ -39,17 +39,21 @@ from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, 
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK = True
+USE_MASK = False
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
 BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
 
+
+
 # Paths
-NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
-GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/mit_b1_envelop_mix_loss_best_bin_loss.pt"
+NPZ_TRAIN_PATH = "data/fix_leak_data_noised_5precent/dataset_1500m_w_fix_leak_train_w.npz"
+NPZ_TEST_PATH = "data/fix_leak_data_noised_5precent/dataset_1500m_w_fix_leak_test_w.npz"
+CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/data_fix/mit_b1_1500m_leakag_fix_noised_best_bin_loss.pt"
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
+# Option to disable ConvLSTM temporal processing entirely
+USE_CONV_LSTM = True
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
@@ -64,10 +68,18 @@ max_y = None  # 8.784920692443848
 # -----------------------------
 # 2. Process Validation Dataset Only
 # -----------------------------
-full_dataset = NPZSequenceDataset(
-    NPZ_PATH,
+# Load train dataset for normalization/denormalization
+train_dataset_for_norm = NPZSequenceDataset(
+    NPZ_TRAIN_PATH,
     use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
-    gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH
+    gt_envelope_npz_path=NPZ_TRAIN_PATH,
+)
+
+# Load test dataset for evaluation
+full_dataset = NPZSequenceDataset(
+    NPZ_TEST_PATH,
+    use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+    gt_envelope_npz_path=NPZ_TEST_PATH,
 )
 _, C, _, _ = full_dataset[0][0].shape
 
@@ -97,9 +109,10 @@ if BACKBONE == "resnet18":
     print("[INFO] Loading ResNet18 Model...")
     model = PretrainedTemporalUNet(
         out_channels=1,
-        lstm_layers=1,
+        lstm_layers=1 if USE_CONV_LSTM else 0,
         freeze_encoder=cfg.get('freeze_encoder', True),
         in_channels=model_in_channels,
+        use_conv_lstm=USE_CONV_LSTM,
         use_refiner=has_refiner,
         refiner_hidden_channels=refiner_hidden_channels
     )
@@ -107,9 +120,10 @@ elif BACKBONE == "mit_b1":
     print("[INFO] Loading MiT-B1 Model...")
     model = PretrainedTemporalUNetMitB1(
         out_channels=1,
-        lstm_layers=1,
+        lstm_layers=1 if USE_CONV_LSTM else 0,
         freeze_encoder=cfg.get('freeze_encoder', True),
         in_channels=model_in_channels,
+        use_conv_lstm=USE_CONV_LSTM,
         use_refiner=has_refiner,
         refiner_hidden_channels=refiner_hidden_channels
     )
@@ -117,9 +131,10 @@ elif BACKBONE == "mit_b2":
     print("[INFO] Loading MiT-B2 Model...")
     model = PretrainedTemporalUNetMitB2(
         out_channels=1,
-        lstm_layers=1,
+        lstm_layers=1 if USE_CONV_LSTM else 0,
         freeze_encoder=cfg.get('freeze_encoder', True),
         in_channels=model_in_channels,
+        use_conv_lstm=USE_CONV_LSTM,
         use_refiner=has_refiner,
         refiner_hidden_channels=refiner_hidden_channels
     )
@@ -127,9 +142,10 @@ elif BACKBONE == "mit_b3":
     print("[INFO] Loading MiT-B3 Model...")
     model = PretrainedTemporalUNetMitB3(
         out_channels=1,
-        lstm_layers=2,
+        lstm_layers=2 if USE_CONV_LSTM else 0,
         freeze_encoder=cfg.get('freeze_encoder', True),
         in_channels=model_in_channels,
+        use_conv_lstm=USE_CONV_LSTM,
         use_refiner=has_refiner,
         refiner_hidden_channels=refiner_hidden_channels
     )
@@ -189,9 +205,9 @@ for i in tqdm(range(len(eval_ds)), desc="Evaluating"):
 
     pred_vel = pred_tensor.squeeze(0).cpu().numpy()
 
-    # Denormalize
+    # Denormalize GT using test dataset stats, predictions using train dataset stats
     gt_vel_denorm = full_dataset.denormalize(gt_vel_seq)
-    pred_vel_denorm = full_dataset.denormalize(pred_vel)
+    pred_vel_denorm = train_dataset_for_norm.denormalize(pred_vel)
 
     # --- Masking Logic ---
     if USE_MASK:

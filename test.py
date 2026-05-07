@@ -43,14 +43,16 @@ focus_thresh = 2.0
 # Paths
 # NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top.npz"
 # CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
-NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
-GT_ENVELOPE_NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top_w.npz"
-CHECKPOINT_PATH = "models/mit_b1_envelop_mix_loss_best_bin_loss.pt"
+NPZ_TRAIN_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_train_w.npz"
+NPZ_TEST_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_test_w.npz"
+GT_ENVELOPE_NPZ_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_test_w.npz"
+CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/data_fix/mit_b1_envelop_leakag_fix_best_bin_loss.pt"
+USE_CONV_LSTM = True
 USE_MASK =  True  # True, False, or "slice_mask"
 SHOW_MASK_IMG = True
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
 BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
-SEQUENCE_IDX = 1000
+SEQUENCE_IDX = 100
 USE_TEST_SPLIT = False
 TEST_SPLIT_SEED = 42
 TEST_SEQ_RANK = 49
@@ -81,8 +83,16 @@ def apply_pdf_layout(fig, ax):
 # -----------------------------
 # 3. Run Inference
 # -----------------------------
+# Load train dataset for normalization/denormalization
+train_dataset_for_norm = NPZSequenceDataset(
+    NPZ_TRAIN_PATH,
+    use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+    gt_envelope_npz_path=NPZ_TRAIN_PATH
+)
+
+# Load test dataset
 dataset = NPZSequenceDataset(
-    NPZ_PATH,
+    NPZ_TEST_PATH,
     use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
     gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH
 )
@@ -139,9 +149,10 @@ if BACKBONE == "resnet18":
     print("[INFO] Loading ResNet18 Model...")
     model = PretrainedTemporalUNet(
         out_channels=1,
-        lstm_layers=2,
+        lstm_layers=2 if USE_CONV_LSTM else 0,
         freeze_encoder=cfg.get('freeze_encoder', True),
         in_channels=model_in_channels,
+        use_conv_lstm=USE_CONV_LSTM,
         use_refiner=has_refiner,
         refiner_hidden_channels=refiner_hidden_channels
     )
@@ -149,9 +160,10 @@ elif BACKBONE == "mit_b1":
     print("[INFO] Loading MiT-B1 Model...")
     model = PretrainedTemporalUNetMitB1(
         out_channels=1,
-        lstm_layers=1,
+        lstm_layers=1 if USE_CONV_LSTM else 0,
         freeze_encoder=cfg.get('freeze_encoder', True),
         in_channels=model_in_channels,
+        use_conv_lstm=USE_CONV_LSTM,
         use_refiner=has_refiner,
         refiner_hidden_channels=refiner_hidden_channels
     )
@@ -159,9 +171,10 @@ elif BACKBONE == "mit_b2":
     print("[INFO] Loading MiT-B2 Model...")
     model = PretrainedTemporalUNetMitB2(
         out_channels=1,
-        lstm_layers=1,
+        lstm_layers=1 if USE_CONV_LSTM else 0,
         freeze_encoder=cfg.get('freeze_encoder', True),
         in_channels=model_in_channels,
+        use_conv_lstm=USE_CONV_LSTM,
         use_refiner=has_refiner,
         refiner_hidden_channels=refiner_hidden_channels
     )
@@ -169,9 +182,10 @@ elif BACKBONE == "mit_b3":
     print("[INFO] Loading MiT-B3 Model...")
     model = PretrainedTemporalUNetMitB3(
         out_channels=1,
-        lstm_layers=2,
+        lstm_layers=2 if USE_CONV_LSTM else 0,
         freeze_encoder=cfg.get('freeze_encoder', True),
         in_channels=model_in_channels,
+        use_conv_lstm=USE_CONV_LSTM,
         use_refiner=has_refiner,
         refiner_hidden_channels=refiner_hidden_channels
     )
@@ -191,7 +205,7 @@ if has_refiner:
 else:
     print("[INFO] Refiner DISABLED (checkpoint has no refiner weights)")
 
-# Denormalize GT (use dataset.denormalize which handles non-linear transform)
+# Denormalize GT using test dataset stats
 gt_vel_denorm = dataset.denormalize(gt_vel_seq)
 
 # --- Fixed plot range so color scale doesn't jump per-frame ---
@@ -493,7 +507,7 @@ for t_len in range(1, T + 1):
         pred_tensor = output
 
     pred_vel = pred_tensor.squeeze(0).cpu().numpy()
-    pred_vel_denorm = dataset.denormalize(pred_vel)
+    pred_vel_denorm = train_dataset_for_norm.denormalize(pred_vel)
 
     # Get Last Frame Data
     last_idx = t_len - 1
