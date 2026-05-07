@@ -12,3 +12,5 @@ setsid pycharm >/dev/null 2>&1 &
 source /home/danino/PycharmProjects/pythonProject/venv/bin/activate
 
 CUDA_LAUNCH_BLOCKING=1 nohup python -u main.py > train_nolstm.log 2>&1 &
+
+ i=0; for d in $(ls -1 | sort); do mv "$d" "$(printf "%010d" $i)"; ((i+=1)); done

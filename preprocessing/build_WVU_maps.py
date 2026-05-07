@@ -52,20 +52,23 @@ if __name__ == "__main__":
 
     # ================= CONFIGURATION =================
     # Paths
-    input_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,reff,lwc,U,V,W)_fixed_to_shdom/18000_18220/'
-    output_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,reff,lwc,U,V,W)_fixed_to_shdom/18000_18220_vel/'
+    input_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,reff,lwc,U,V,W)_fixed_to_shdom/10000_10220/'
+    output_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,reff,lwc,U,V,W)_fixed_to_shdom/10000_10220_top_vel/'
     csv_file_path = '/home/danino/PycharmProjects/pythonProject/data/Dor_2satellites_overpass.csv'
 
     # Rendering Mode
-    RENDER_MODE = 'slice'  # Options: 'slice' OR 'first_hit'
+    RENDER_MODE = 'first_hit'  # Options: 'slice' OR 'first_hit'
 
     # Parameters for Slice Mode
-    SLICE_HEIGHT_M = 1000.0
+    SLICE_HEIGHT_M = 500.0
     REFERENCE_PLANE_Z = 750.0
 
     # --- CAMERA OVERRIDE SETTINGS ---
     # Set this to True to ignore the CSV camera position and use the fixed one below
-    USE_FIXED_CAMERA = True
+    if RENDER_MODE == 'slice':
+        USE_FIXED_CAMERA = True
+    else:
+        USE_FIXED_CAMERA = False
 
     # Fixed Camera Position (Meters) - e.g. [0, 0, 600km]
     FIXED_CAMERA_POS = np.array([0.0, 0.0, 600.0 * 1000.0])
