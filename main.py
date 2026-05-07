@@ -410,15 +410,19 @@ if __name__ == "__main__":
     WEIGHT_DECAY = 1e-4
 
     BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
-    USE_MASK = True  # True, False, or "slice_mask"
+    USE_MASK = "slice_mask"  # True, False, or "slice_mask"
     USE_ENVELOP_AS_A_INPUT = False  # Whether to feed GT envelope velocity as an extra input channel
+    # Use only one satellite image (first channel) instead of two
+    USE_ONE_SATELLITE = False
     UNMASKED_WEIGHT_FACTOR = 0.9  # Weight multiplier for unmasked areas in slice_mask mode
     TRAIN_AUGMENT = False
-    NPZ_TRAIN_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_train_w.npz"
-    NPZ_VAL_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_val_w.npz"
-    NPZ_TEST_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_test_w.npz"
-    GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_envelop_w.npz"
-    model_name = f"{BACKBONE}_envelop_data_leakag_fix_no_conv_lstm"
+    NPZ_TRAIN_PATH = "data/fix_leak_data/dataset_1000m_w_fix_leak_train_w.npz"
+    NPZ_VAL_PATH = "data/fix_leak_data/dataset_1000m_w_fix_leak_val_w.npz"
+    NPZ_TEST_PATH = "data/fix_leak_data/dataset_1000m_w_fix_leak_test_w.npz"
+    GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_1000m_w.npz"
+    model_name = f"{BACKBONE}_1000m_data_leakag_fix_no_conv_lstm"
+    if USE_ONE_SATELLITE:
+        model_name = model_name + "_one_sat"
     USE_CONV_LSTM = False
 
     # Refiner config
@@ -449,19 +453,22 @@ if __name__ == "__main__":
         gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
         augment=TRAIN_AUGMENT,
         augment_repeats=3,
-        deterministic_aug=True
+        deterministic_aug=True,
+        use_one_satellite=USE_ONE_SATELLITE,
     )
     val_dataset = NPZSequenceDataset(
         NPZ_VAL_PATH,
         use_gt_envelope_as_input=USE_ENVELOP_AS_A_INPUT,
         gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
-        augment=False
+        augment=False,
+        use_one_satellite=USE_ONE_SATELLITE
     )
     test_dataset = NPZSequenceDataset(
         NPZ_TEST_PATH,
         use_gt_envelope_as_input=USE_ENVELOP_AS_A_INPUT,
         gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
-        augment=False
+        augment=False,
+        use_one_satellite=USE_ONE_SATELLITE
     )
 
     # Force train-derived normalization for val/test for consistent denormalized metrics.
@@ -579,7 +586,7 @@ if __name__ == "__main__":
     print(f"[INFO] Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3, verbose=True
+        optimizer, mode='min', factor=0.5, patience=3
     )
 
     # --- 4. Training Loop ---
@@ -624,7 +631,7 @@ if __name__ == "__main__":
             )
             scaler = GradScaler(enabled=(device.type == "cuda"))
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode='min', factor=0.5, patience=5, verbose=True
+                optimizer, mode='min', factor=0.5, patience=5
             )
             best_val_loss = float('inf')  # Reset for Stage 2
             best_state = None
@@ -674,7 +681,7 @@ if __name__ == "__main__":
             )
             scaler = GradScaler(enabled=(device.type == "cuda"))
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode='min', factor=0.5, patience=5, verbose=True
+                optimizer, mode='min', factor=0.5, patience=5
             )
             # Do not reset best_val_loss here; keep tracking best across all stages
             best_state = None
@@ -755,7 +762,12 @@ if __name__ == "__main__":
                 save_path = os.path.join(save_dir, f"{model_name}_best_bin_loss.pt")
                 torch.save({
                     'model_state': model.state_dict(),
-                    'config': {'type': BACKBONE, 'in_channels': in_channels, 'stage': current_stage},
+                    'config': {
+                        'type': BACKBONE,
+                        'in_channels': in_channels,
+                        'use_one_satellite': USE_ONE_SATELLITE,
+                        'stage': current_stage
+                    },
                     'val_loss': best_val_loss,
                     'epoch': epoch,
                     'stage': current_stage

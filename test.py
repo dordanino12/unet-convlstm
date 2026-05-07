@@ -43,12 +43,12 @@ focus_thresh = 2.0
 # Paths
 # NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top.npz"
 # CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
-NPZ_TRAIN_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_train_w.npz"
-NPZ_TEST_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_test_w.npz"
 GT_ENVELOPE_NPZ_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_test_w.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/data_fix/mit_b1_envelop_leakag_fix_best_bin_loss.pt"
+NPZ_TRAIN_PATH = "data/fix_leak_data_noised_5precent/dataset_1000m_w_fix_leak_train_w.npz"
+NPZ_TEST_PATH = "data/fix_leak_data_noised_5precent/dataset_1000m_w_fix_leak_test_w.npz"
+CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/sat1/mit_b1_1000m_data_leakag_fix_sat1_best_bin_loss.pt"
 USE_CONV_LSTM = True
-USE_MASK =  True  # True, False, or "slice_mask"
+USE_MASK =  False  # True, False, or "slice_mask"
 SHOW_MASK_IMG = True
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
 BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
@@ -60,6 +60,8 @@ CSV_PATH = "data/Dor_2satellites_overpass.csv"
 VIDEO_FPS = 1
 SAVE_PDF_SECTIONS = True
 PDF_BASE_DIR = os.path.join(os.path.dirname(__file__), 'plots', 'frames_pdf')
+# Option: use only the first satellite image channel (single-sat mode)
+USE_ONE_SATELLITE = True
 
 # PDF Layout Settings
 PDF_FIG_SIZE = (20, 20)
@@ -87,14 +89,16 @@ def apply_pdf_layout(fig, ax):
 train_dataset_for_norm = NPZSequenceDataset(
     NPZ_TRAIN_PATH,
     use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
-    gt_envelope_npz_path=NPZ_TRAIN_PATH
+    gt_envelope_npz_path=NPZ_TRAIN_PATH,
+    use_one_satellite=USE_ONE_SATELLITE
 )
 
 # Load test dataset
 dataset = NPZSequenceDataset(
     NPZ_TEST_PATH,
     use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
-    gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH
+    gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
+    use_one_satellite=USE_ONE_SATELLITE
 )
 if USE_TEST_SPLIT:
     g = torch.Generator().manual_seed(TEST_SPLIT_SEED)
@@ -133,7 +137,33 @@ print(f"[INFO] Loading checkpoint: {CHECKPOINT_PATH}")
 checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
 
 cfg = checkpoint.get('config', {})
-model_in_channels = cfg.get('in_channels', C)
+# Respect checkpoint config for single-sat mode. If the checkpoint doesn't include
+# an explicit flag, infer from checkpoint in_channels==1.
+ckpt_use_one_sat = cfg.get('use_one_satellite', None)
+if ckpt_use_one_sat is None:
+    ckpt_use_one_sat = (cfg.get('in_channels', C) == 1)
+if ckpt_use_one_sat:
+    model_in_channels = 1
+else:
+    model_in_channels = cfg.get('in_channels', C)
+
+# If checkpoint expects single-satellite but dataset was loaded as two-sat, reload datasets
+if ckpt_use_one_sat and not getattr(dataset, 'use_one_satellite', False):
+    print('[INFO] Checkpoint indicates single-satellite input; reloading datasets in single-sat mode')
+    train_dataset_for_norm = NPZSequenceDataset(
+        NPZ_TRAIN_PATH,
+        use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+        gt_envelope_npz_path=NPZ_TRAIN_PATH,
+        use_one_satellite=True
+    )
+    dataset = NPZSequenceDataset(
+        NPZ_TEST_PATH,
+        use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+        gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
+        use_one_satellite=True
+    )
+    input_seq, gt_vel_seq, mask_seq = dataset[SEQUENCE_IDX]
+    T, C, H, W = input_seq.shape
 
 # Auto-detect refiner from checkpoint
 checkpoint_state = checkpoint.get('model_state', checkpoint)
@@ -514,7 +544,11 @@ for t_len in range(1, T + 1):
 
     # Apply Gamma
     raw_sat1 = input_seq[last_idx, 0].cpu().numpy()
-    raw_sat2 = input_seq[last_idx, 1].cpu().numpy()
+    # Handle single-satellite inputs gracefully by duplicating channel 0
+    if input_seq.shape[1] > 1:
+        raw_sat2 = input_seq[last_idx, 1].cpu().numpy()
+    else:
+        raw_sat2 = raw_sat1
     sat1 = apply_gamma(raw_sat1, GAMMA_VAL)
     sat2 = apply_gamma(raw_sat2, GAMMA_VAL)
 

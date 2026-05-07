@@ -18,10 +18,16 @@ class NPZSequenceDataset(Dataset):
     """
 
     def __init__(self, npz_path, use_gt_envelope_as_input=False, gt_envelope_npz_path=None,
-                 augment=False, augment_repeats=1, deterministic_aug=False):
+                 augment=False, augment_repeats=1, deterministic_aug=False, use_one_satellite: bool = False):
         data = np.load(npz_path)
         self.X = data["X"].astype(np.float32)
         self.Y = data["Y"].astype(np.float32)
+        # Optionally reduce to a single satellite channel (keep the first channel)
+        self.use_one_satellite = bool(use_one_satellite)
+        if self.use_one_satellite:
+            # X shape: (N, T, C, H, W) -> select channel 0 -> (N, T, 1, H, W)
+            self.X = self.X[:, :, 0:1, :, :]
+
         self.N, self.T, _, self.H, self.W = self.X.shape
         self.use_gt_envelope_as_input = use_gt_envelope_as_input
         self.gt_envelope_npz_path = gt_envelope_npz_path
@@ -68,7 +74,8 @@ class NPZSequenceDataset(Dataset):
             if self.scale_env == 0:
                 self.scale_env = 1.0
 
-        print(f"[INFO] Dataset Loaded. Range: [-{self.max_neg_val:.2f}, {self.max_pos_val:.2f}]")
+        sat_info = "(single-sat mode)" if self.use_one_satellite else "(two-sat mode)"
+        print(f"[INFO] Dataset Loaded. Range: [-{self.max_neg_val:.2f}, {self.max_pos_val:.2f}] {sat_info}")
         print(f"[INFO] Symmetric Norm:")
         print(f"       Scale: {self.scale:.2f} (Maps +/-{self.max_abs_val} -> +/-{self.target_norm})")
 

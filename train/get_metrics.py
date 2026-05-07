@@ -39,21 +39,23 @@ from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, 
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK = False
+USE_MASK = True
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
 BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
+# Option: use only the first satellite image channel (single-sat mode)
+USE_ONE_SATELLITE = False
 
 
 
 # Paths
-NPZ_TRAIN_PATH = "data/fix_leak_data_noised_5precent/dataset_1500m_w_fix_leak_train_w.npz"
-NPZ_TEST_PATH = "data/fix_leak_data_noised_5precent/dataset_1500m_w_fix_leak_test_w.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/data_fix/mit_b1_1500m_leakag_fix_noised_best_bin_loss.pt"
+NPZ_TRAIN_PATH = "data/fix_leak_data_noised_5precent/dataset_envelop_w_fix_leak_train_w.npz"
+NPZ_TEST_PATH = "data/fix_leak_data_noised_5precent/dataset_envelop_w_fix_leak_test_w.npz"
+CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/nolstm/mit_b1_envelop_data_leakag_fix_no_conv_lstm_best_bin_loss.pt"
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 # Option to disable ConvLSTM temporal processing entirely
-USE_CONV_LSTM = True
+USE_CONV_LSTM = False
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
@@ -73,6 +75,7 @@ train_dataset_for_norm = NPZSequenceDataset(
     NPZ_TRAIN_PATH,
     use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
     gt_envelope_npz_path=NPZ_TRAIN_PATH,
+    use_one_satellite=USE_ONE_SATELLITE
 )
 
 # Load test dataset for evaluation
@@ -80,6 +83,7 @@ full_dataset = NPZSequenceDataset(
     NPZ_TEST_PATH,
     use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
     gt_envelope_npz_path=NPZ_TEST_PATH,
+    use_one_satellite=USE_ONE_SATELLITE
 )
 _, C, _, _ = full_dataset[0][0].shape
 
@@ -90,7 +94,32 @@ print(f"[INFO] Loading checkpoint: {CHECKPOINT_PATH}")
 checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
 
 cfg = checkpoint.get('config', {})
-model_in_channels = cfg.get('in_channels', C)
+# Respect checkpoint config for single-sat mode. If the checkpoint doesn't include
+# an explicit flag, infer from checkpoint in_channels==1.
+ckpt_use_one_sat = cfg.get('use_one_satellite', None)
+if ckpt_use_one_sat is None:
+    ckpt_use_one_sat = (cfg.get('in_channels', C) == 1)
+if ckpt_use_one_sat:
+    model_in_channels = 1
+else:
+    model_in_channels = cfg.get('in_channels', C)
+
+# If checkpoint expects single-satellite but dataset was loaded as two-sat, reload datasets
+if ckpt_use_one_sat and not getattr(full_dataset, 'use_one_satellite', False):
+    print('[INFO] Checkpoint indicates single-satellite input; reloading datasets in single-sat mode')
+    train_dataset_for_norm = NPZSequenceDataset(
+        NPZ_TRAIN_PATH,
+        use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+        gt_envelope_npz_path=NPZ_TRAIN_PATH,
+        use_one_satellite=True
+    )
+    full_dataset = NPZSequenceDataset(
+        NPZ_TEST_PATH,
+        use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+        gt_envelope_npz_path=NPZ_TEST_PATH,
+        use_one_satellite=True
+    )
+    _, C, _, _ = full_dataset[0][0].shape
 
 # Auto-detect if checkpoint has refiner weights
 checkpoint_state = checkpoint['model_state']
