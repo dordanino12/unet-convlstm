@@ -28,15 +28,20 @@ class CloudRayCaster:
     def __init__(self, pkl_path, voxel_size=20.0):
         """
         Loads the cloud volume.
+        If U or V do not exist, uses W as fallback.
         """
         # 1. Load Data
         with open(pkl_path, 'rb') as f:
             data = pickle.load(f)
 
         self.vol_beta = data['beta_ext']
-        self.vol_u = data['U']
-        self.vol_v = data['V']
         self.vol_w = data['W']
+        
+        # Check if U and V exist, otherwise use W as fallback
+        self.vol_u = data.get('U', self.vol_w)
+        self.vol_v = data.get('V', self.vol_w)
+        self.has_u = 'U' in data
+        self.has_v = 'V' in data
 
         # 2. Define Grid Dimensions
         self.nz, self.ny, self.nx = self.vol_beta.shape
@@ -168,7 +173,11 @@ class CloudRayCaster:
         v_map[valid_indices] = final_v
         w_map[valid_indices] = final_w
 
-        return u_map.reshape(H, W_res), v_map.reshape(H, W_res), w_map.reshape(H, W_res)
+        # Return None for U/V if they don't exist
+        u_ret = u_map.reshape(H, W_res) if self.has_u else None
+        v_ret = v_map.reshape(H, W_res) if self.has_v else None
+        w_ret = w_map.reshape(H, W_res)
+        return u_ret, v_ret, w_ret
 
     def render_z_slice(self, cam_pos, look_at, target_z_height, resolution=(128, 128), reference_plane_z=750.0):
         """
@@ -241,12 +250,16 @@ class CloudRayCaster:
         v_map[valid_indices] = self.vol_v[gz, gy, gx]
         w_map[valid_indices] = self.vol_w[gz, gy, gx]
 
-        return u_map.reshape(H, W_res), v_map.reshape(H, W_res), w_map.reshape(H, W_res)
+        # Return None for U/V if they don't exist
+        u_ret = u_map.reshape(H, W_res) if self.has_u else None
+        v_ret = v_map.reshape(H, W_res) if self.has_v else None
+        w_ret = w_map.reshape(H, W_res)
+        return u_ret, v_ret, w_ret
 
 
 # --- Usage Example ---
 if __name__ == "__main__":
-    pkl_file = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000005920/sample_012.pkl'
+    pkl_file = '/wdata_visl/danino/BOMEX_1CLD_256x200_20m_processed/0000003420/sample_004.pkl'
     output_dir = "/home/danino/PycharmProjects/pythonProject/data/output/"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -263,8 +276,8 @@ if __name__ == "__main__":
 
     # --- CONFIGURATION ---
     # Choose mode: 'first_hit' (Cloud Surface) or 'slice' (Specific Height)
-    render_mode = 'first_hit'
-    slice_height_m = 500.0  # Height in meters to slice (e.g., middle of cloud)
+    render_mode = 'slice'
+    slice_height_m = 1000.0  # Height in meters to slice (e.g., middle of cloud)
     
     # Output mode: True = clean image (only velocity map), False = full (with axes, titles, colorbar)
     clean_image_mode = True
@@ -287,16 +300,18 @@ if __name__ == "__main__":
 
     # --- Limit Calculation ---
     def get_dynamic_limit(data_map, fallback=10.0):
+        if data_map is None:
+            return fallback
         valid_data = data_map[~np.isnan(data_map)]
         if len(valid_data) == 0: return fallback
         return np.percentile(np.abs(valid_data), 99)
 
-    lim_u = get_dynamic_limit(u_map, fallback=10.0)
-    lim_v = get_dynamic_limit(v_map, fallback=10.0)
+    lim_u = get_dynamic_limit(u_map, fallback=10.0) if u_map is not None else None
+    lim_v = get_dynamic_limit(v_map, fallback=10.0) if v_map is not None else None
     lim_w = 2.0  # Fixed for W
 
     # --- Resolution-dependent pixel size ---
-    H, W = u_map.shape
+    H, W = w_map.shape if w_map is not None else (u_map.shape if u_map is not None else v_map.shape)
     if W == 128:
         m_per_pixel = 20
     elif W == 256:
@@ -339,19 +354,24 @@ if __name__ == "__main__":
         ax.set_ylabel('Y [m]', fontsize=70, fontweight='bold')
 
     # --- Plotting with centered axes and jet colormap ---
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    # Determine number of subplots based on available data
+    num_plots = sum([u_map is not None, v_map is not None, w_map is not None])
+    fig, axes = plt.subplots(1, num_plots, figsize=(6 * num_plots, 6))
+    if num_plots == 1:
+        axes = [axes]  # Make axes iterable for single plot case
+    
     current_cmap = plt.cm.jet.copy()
     current_cmap.set_bad(color='black')
 
-    # Mask zeros to show them as black
-    u_plot = np.ma.masked_where(u_map == 0, u_map)
-    v_plot = np.ma.masked_where(v_map == 0, v_map)
-    w_plot = np.ma.masked_where(w_map == 0, w_map)
+    # Mask zeros to show them as black (only if they exist)
+    u_plot = np.ma.masked_where(u_map == 0, u_map) if u_map is not None else None
+    v_plot = np.ma.masked_where(v_map == 0, v_map) if v_map is not None else None
+    w_plot = np.ma.masked_where(w_map == 0, w_map) if w_map is not None else None
 
     # Create normalization for each component (using vmin/vmax with jet)
     from matplotlib.colors import Normalize
-    norm_u = Normalize(vmin=-lim_u, vmax=lim_u)
-    norm_v = Normalize(vmin=-lim_v, vmax=lim_v)
+    norm_u = Normalize(vmin=-lim_u, vmax=lim_u) if lim_u is not None else None
+    norm_v = Normalize(vmin=-lim_v, vmax=lim_v) if lim_v is not None else None
     norm_w = Normalize(vmin=-lim_w, vmax=lim_w)
 
     # Compute extent in meters so that (0,0) is centered and axes are in meters
@@ -359,133 +379,140 @@ if __name__ == "__main__":
     half_h_m = (H * m_per_pixel) / 2.0
     extent_m = [-half_w_m, half_w_m, half_h_m, -half_h_m]
 
-    # Plot U
-    im0 = axes[0].imshow(u_plot, cmap=current_cmap, norm=norm_u, extent=extent_m, interpolation='nearest')
-    axes[0].set_title(f"{title_prefix} - Velocity U [m/s]\nLimit: +/-{lim_u:.1f}", pad=24, fontsize=20, fontweight='bold')
-    set_centered_meter_axis(axes[0], H, W, m_per_pixel)
-    cbar0 = plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
-    cbar0.ax.tick_params(labelsize=70)
-    cbar0.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
-    cbar0.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+    plot_idx = 0
+    
+    # Plot U if it exists
+    if u_map is not None:
+        im0 = axes[plot_idx].imshow(u_plot, cmap=current_cmap, norm=norm_u, extent=extent_m, interpolation='nearest')
+        axes[plot_idx].set_title(f"{title_prefix} - Velocity U [m/s]\nLimit: +/-{lim_u:.1f}", pad=24, fontsize=20, fontweight='bold')
+        set_centered_meter_axis(axes[plot_idx], H, W, m_per_pixel)
+        cbar0 = plt.colorbar(im0, ax=axes[plot_idx], fraction=0.046, pad=0.04)
+        cbar0.ax.tick_params(labelsize=70)
+        cbar0.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+        cbar0.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+        for label in cbar0.ax.get_yticklabels():
+            label.set_fontsize(70)
+            label.set_fontweight('bold')
+        plot_idx += 1
 
-    # Set colorbar tick labels to be large and bold
-    for label in cbar0.ax.get_yticklabels():
-        label.set_fontsize(70)
-        label.set_fontweight('bold')
+    # Plot V if it exists
+    if v_map is not None:
+        im1 = axes[plot_idx].imshow(v_plot, cmap=current_cmap, norm=norm_v, extent=extent_m, interpolation='nearest')
+        axes[plot_idx].set_title(f"{title_prefix} - Velocity V [m/s]\nLimit: +/-{lim_v:.1f}", pad=24, fontsize=20, fontweight='bold')
+        set_centered_meter_axis(axes[plot_idx], H, W, m_per_pixel)
+        cbar1 = plt.colorbar(im1, ax=axes[plot_idx], fraction=0.046, pad=0.04)
+        cbar1.ax.tick_params(labelsize=70)
+        cbar1.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+        cbar1.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+        for label in cbar1.ax.get_yticklabels():
+            label.set_fontsize(70)
+            label.set_fontweight('bold')
+        plot_idx += 1
 
-    # Plot V
-    im1 = axes[1].imshow(v_plot, cmap=current_cmap, norm=norm_v, extent=extent_m, interpolation='nearest')
-    axes[1].set_title(f"{title_prefix} - Velocity V [m/s]\nLimit: +/-{lim_v:.1f}", pad=24, fontsize=20, fontweight='bold')
-    set_centered_meter_axis(axes[1], H, W, m_per_pixel)
-    cbar1 = plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-    cbar1.ax.tick_params(labelsize=70)
-    cbar1.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
-    cbar1.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
-
-    # Set colorbar tick labels to be large and bold
-    for label in cbar1.ax.get_yticklabels():
-        label.set_fontsize(70)
-        label.set_fontweight('bold')
-
-    # Plot W
-    im2 = axes[2].imshow(w_plot, cmap=current_cmap, norm=norm_w, extent=extent_m, interpolation='nearest')
-    axes[2].set_title(f"{title_prefix} - $V_z$ [m/s]\nLimit: +/-{lim_w:.1f}", pad=24, fontsize=20, fontweight='bold')
-    set_centered_meter_axis(axes[2], H, W, m_per_pixel)
-    cbar2 = plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-    cbar2.ax.tick_params(labelsize=70)
-    cbar2.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
-    cbar2.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
-
-    # Set colorbar tick labels to be large and bold
-    for label in cbar2.ax.get_yticklabels():
-        label.set_fontsize(70)
-        label.set_fontweight('bold')
+    # Plot W (always plot if it exists)
+    if w_map is not None:
+        im2 = axes[plot_idx].imshow(w_plot, cmap=current_cmap, norm=norm_w, extent=extent_m, interpolation='nearest')
+        axes[plot_idx].set_title(f"{title_prefix} - $V_z$ [m/s]\nLimit: +/-{lim_w:.1f}", pad=24, fontsize=20, fontweight='bold')
+        set_centered_meter_axis(axes[plot_idx], H, W, m_per_pixel)
+        cbar2 = plt.colorbar(im2, ax=axes[plot_idx], fraction=0.046, pad=0.04)
+        cbar2.ax.tick_params(labelsize=70)
+        cbar2.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+        cbar2.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+        for label in cbar2.ax.get_yticklabels():
+            label.set_fontsize(70)
+            label.set_fontweight('bold')
 
     # --- Saving with proper colormaps ---
     print("Saving PDFs...")
-    # Save U
-    fig_u, ax_u = plt.subplots(figsize=(12, 12), dpi=150)
-    im_u = ax_u.imshow(u_plot, cmap=current_cmap, norm=norm_u, extent=extent_m, interpolation='nearest')
-    
-    if clean_image_mode:
-        # Clean mode: no axes or title, but with colorbar
-        ax_u.axis('off')
-        cbar_u = plt.colorbar(im_u, ax=ax_u, fraction=0.046, pad=0.04)
-        cbar_u.ax.tick_params(labelsize=70)
-        cbar_u.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
-        cbar_u.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+    # Save U (only if it exists)
+    if u_plot is not None:
+        fig_u, ax_u = plt.subplots(figsize=(12, 12), dpi=150)
+        im_u = ax_u.imshow(u_plot, cmap=current_cmap, norm=norm_u, extent=extent_m, interpolation='nearest')
+        
+        if clean_image_mode:
+            # Clean mode: no axes or title, but with colorbar
+            ax_u.axis('off')
+            cbar_u = plt.colorbar(im_u, ax=ax_u, fraction=0.046, pad=0.04)
+            cbar_u.ax.tick_params(labelsize=70)
+            cbar_u.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+            cbar_u.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
 
-        # Set colorbar tick labels to be large and bold
-        for label in cbar_u.ax.get_yticklabels():
-            label.set_fontsize(70)
-            label.set_fontweight('bold')
+            # Set colorbar tick labels to be large and bold
+            for label in cbar_u.ax.get_yticklabels():
+                label.set_fontsize(70)
+                label.set_fontweight('bold')
 
-        plt.tight_layout(pad=0)
-        fig_u.set_size_inches(20, 18)
-        plt.subplots_adjust(left=0, right=0.88, top=1, bottom=0)
+            plt.tight_layout(pad=0)
+            fig_u.set_size_inches(20, 18)
+            plt.subplots_adjust(left=0, right=0.88, top=1, bottom=0)
+        else:
+            # Full mode: with axes, title, and colorbar
+            ax_u.set_title(f"{title_prefix} - Velocity U [m/s]", fontsize=70, fontweight='bold', pad=40)
+            set_centered_meter_axis(ax_u, H, W, m_per_pixel)
+            cbar_u = plt.colorbar(im_u, ax=ax_u, fraction=0.046, pad=0.04)
+            cbar_u.ax.tick_params(labelsize=70)
+            cbar_u.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+            cbar_u.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+
+            # Set colorbar tick labels to be large and bold
+            for label in cbar_u.ax.get_yticklabels():
+                label.set_fontsize(70)
+                label.set_fontweight('bold')
+
+            plt.tight_layout()
+            fig_u.set_size_inches(20, 18)
+            plt.subplots_adjust(left=0.19, right=0.87, top=0.99, bottom=0.01)
+        
+        plt.savefig(os.path.join(output_dir, f"{file_prefix}_U.pdf"), dpi=150)
+        plt.close(fig_u)
+        print(f"  Saved: {file_prefix}_U.pdf")
     else:
-        # Full mode: with axes, title, and colorbar
-        ax_u.set_title(f"{title_prefix} - Velocity U [m/s]", fontsize=70, fontweight='bold', pad=40)
-        set_centered_meter_axis(ax_u, H, W, m_per_pixel)
-        cbar_u = plt.colorbar(im_u, ax=ax_u, fraction=0.046, pad=0.04)
-        cbar_u.ax.tick_params(labelsize=70)
-        cbar_u.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
-        cbar_u.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+        print("  Skipped: U data not available")
 
-        # Set colorbar tick labels to be large and bold
-        for label in cbar_u.ax.get_yticklabels():
-            label.set_fontsize(70)
-            label.set_fontweight('bold')
+    # Save V (only if it exists)
+    if v_plot is not None:
+        fig_v, ax_v = plt.subplots(figsize=(12, 12), dpi=150)
+        im_v = ax_v.imshow(v_plot, cmap=current_cmap, norm=norm_v, extent=extent_m, interpolation='nearest')
+        
+        if clean_image_mode:
+            # Clean mode: no axes or title, but with colorbar
+            ax_v.axis('off')
+            cbar_v = plt.colorbar(im_v, ax=ax_v, fraction=0.046, pad=0.04)
+            cbar_v.ax.tick_params(labelsize=70)
+            cbar_v.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+            cbar_v.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
 
-        plt.tight_layout()
-        fig_u.set_size_inches(20, 18)
-        plt.subplots_adjust(left=0.19, right=0.87, top=0.99, bottom=0.01)
-    
-    plt.savefig(os.path.join(output_dir, f"{file_prefix}_U.pdf"), dpi=150)
-    plt.close(fig_u)
-    print(f"  Saved: {file_prefix}_U.pdf")
+            # Set colorbar tick labels to be large and bold
+            for label in cbar_v.ax.get_yticklabels():
+                label.set_fontsize(70)
+                label.set_fontweight('bold')
 
-    # Save V
-    fig_v, ax_v = plt.subplots(figsize=(12, 12), dpi=150)
-    im_v = ax_v.imshow(v_plot, cmap=current_cmap, norm=norm_v, extent=extent_m, interpolation='nearest')
-    
-    if clean_image_mode:
-        # Clean mode: no axes or title, but with colorbar
-        ax_v.axis('off')
-        cbar_v = plt.colorbar(im_v, ax=ax_v, fraction=0.046, pad=0.04)
-        cbar_v.ax.tick_params(labelsize=70)
-        cbar_v.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
-        cbar_v.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+            plt.tight_layout(pad=0)
+            fig_v.set_size_inches(20, 18)
+            plt.subplots_adjust(left=0, right=0.88, top=1, bottom=0)
+        else:
+            # Full mode: with axes, title, and colorbar
+            ax_v.set_title(f"{title_prefix} - Velocity V [m/s]", fontsize=70, fontweight='bold', pad=40)
+            set_centered_meter_axis(ax_v, H, W, m_per_pixel)
+            cbar_v = plt.colorbar(im_v, ax=ax_v, fraction=0.046, pad=0.04)
+            cbar_v.ax.tick_params(labelsize=70)
+            cbar_v.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+            cbar_v.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
 
-        # Set colorbar tick labels to be large and bold
-        for label in cbar_v.ax.get_yticklabels():
-            label.set_fontsize(70)
-            label.set_fontweight('bold')
+            # Set colorbar tick labels to be large and bold
+            for label in cbar_v.ax.get_yticklabels():
+                label.set_fontsize(70)
+                label.set_fontweight('bold')
 
-        plt.tight_layout(pad=0)
-        fig_v.set_size_inches(20, 18)
-        plt.subplots_adjust(left=0, right=0.88, top=1, bottom=0)
+            plt.tight_layout()
+            fig_v.set_size_inches(20, 18)
+            plt.subplots_adjust(left=0.19, right=0.87, top=0.99, bottom=0.01)
+        
+        plt.savefig(os.path.join(output_dir, f"{file_prefix}_V.pdf"), dpi=150)
+        plt.close(fig_v)
+        print(f"  Saved: {file_prefix}_V.pdf")
     else:
-        # Full mode: with axes, title, and colorbar
-        ax_v.set_title(f"{title_prefix} - Velocity V [m/s]", fontsize=70, fontweight='bold', pad=40)
-        set_centered_meter_axis(ax_v, H, W, m_per_pixel)
-        cbar_v = plt.colorbar(im_v, ax=ax_v, fraction=0.046, pad=0.04)
-        cbar_v.ax.tick_params(labelsize=70)
-        cbar_v.ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
-        cbar_v.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
-
-        # Set colorbar tick labels to be large and bold
-        for label in cbar_v.ax.get_yticklabels():
-            label.set_fontsize(70)
-            label.set_fontweight('bold')
-
-        plt.tight_layout()
-        fig_v.set_size_inches(20, 18)
-        plt.subplots_adjust(left=0.19, right=0.87, top=0.99, bottom=0.01)
-    
-    plt.savefig(os.path.join(output_dir, f"{file_prefix}_V.pdf"), dpi=150)
-    plt.close(fig_v)
-    print(f"  Saved: {file_prefix}_V.pdf")
+        print("  Skipped: V data not available")
 
     # Save W
     fig_w, ax_w = plt.subplots(figsize=(12, 12), dpi=150)

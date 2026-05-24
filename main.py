@@ -397,7 +397,7 @@ if __name__ == "__main__":
     # 3-Stage Training Configuration
     EPOCHS_STAGE1 = 50  # Stage 1: Frozen encoder, no refiner (train decoder/LSTM/head only)
     EPOCHS_STAGE2 = 50   # Stage 2: Unfreeze encoder, no refiner (train full model except refiner)
-    EPOCHS_STAGE3 = 50   # Stage 3: Freeze full model, train only refiner (fine-tune predictions)
+    EPOCHS_STAGE3 = 0   # Stage 3: Freeze full model, train only refiner (fine-tune predictions)
     EPOCHS = EPOCHS_STAGE1 + EPOCHS_STAGE2 + EPOCHS_STAGE3
     # --- Loss schedule parameters ---
     EXPONENT_EPOCHS = 25
@@ -420,13 +420,13 @@ if __name__ == "__main__":
     NPZ_VAL_PATH = "data/fix_leak_data/dataset_1000m_w_fix_leak_val_w.npz"
     NPZ_TEST_PATH = "data/fix_leak_data/dataset_1000m_w_fix_leak_test_w.npz"
     GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_1000m_w.npz"
-    model_name = f"{BACKBONE}_1000m_data_leakag_fix_no_conv_lstm"
+    model_name = f"{BACKBONE}_1000m_data_leakag_fix_no_refiner"
     if USE_ONE_SATELLITE:
         model_name = model_name + "_one_sat"
-    USE_CONV_LSTM = False
+    USE_CONV_LSTM = True
 
     # Refiner config
-    USE_REFINER = True
+    USE_REFINER = False
     REFINER_HIDDEN_CHANNELS = 32
 
     # Bin debug logging

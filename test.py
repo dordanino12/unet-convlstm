@@ -40,28 +40,33 @@ min_y = None #7.5987958908081055
 max_y = None# 8.784920692443848
 focus_thresh = 2.0
 
+# --- Scatter plot sampling config (for per-sequence scatter in this test script)
+SCATTER_BIN_WIDTH = 0.02
+POINTS_PER_BIN = 10
+SCATTER_RANGE = (-8.5, 8.5)
 # Paths
 # NPZ_PATH = "data/dataset_trajectory_sequences_samples_W_top.npz"
 # CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
-GT_ENVELOPE_NPZ_PATH = "data/fix_leak_data/dataset_envelop_w_fix_leak_test_w.npz"
-NPZ_TRAIN_PATH = "data/fix_leak_data_noised_5precent/dataset_1000m_w_fix_leak_train_w.npz"
-NPZ_TEST_PATH = "data/fix_leak_data_noised_5precent/dataset_1000m_w_fix_leak_test_w.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/sat1/mit_b1_1000m_data_leakag_fix_sat1_best_bin_loss.pt"
+GT_ENVELOPE_NPZ_PATH = "data/data_orit_500m_train_w.npz"
+NPZ_TRAIN_PATH = "data/dataset_1000m_w_fix_leak_train_w.npz"
+NPZ_TEST_PATH = "data/dataset_1000m_w_fix_leak_test_w.npz"
+CHECKPOINT_PATH = "models/data_fix/mit_b1_1000m_leakag_fix_noised_best_bin_loss.pt"
 USE_CONV_LSTM = True
 USE_MASK =  False  # True, False, or "slice_mask"
 SHOW_MASK_IMG = True
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
 BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
-SEQUENCE_IDX = 100
+SEQUENCE_IDX = 0
 USE_TEST_SPLIT = False
 TEST_SPLIT_SEED = 42
-TEST_SEQ_RANK = 49
+TEST_SEQ_RANK = 2
 CSV_PATH = "data/Dor_2satellites_overpass.csv"
 VIDEO_FPS = 1
 SAVE_PDF_SECTIONS = True
 PDF_BASE_DIR = os.path.join(os.path.dirname(__file__), 'plots', 'frames_pdf')
 # Option: use only the first satellite image channel (single-sat mode)
-USE_ONE_SATELLITE = True
+USE_ONE_SATELLITE = False
+ADD_SENSOR_NOISE = True  # <--- NEW: Toggle to add Dark Current + Read Noise + Quantization
 
 # PDF Layout Settings
 PDF_FIG_SIZE = (20, 20)
@@ -304,6 +309,11 @@ seq_mae = []
 seq_rmse = []
 seq_mean_err = []
 
+# Accumulators for per-sequence scatter plotting
+seq_scatter_gt_list = []
+seq_scatter_pred_list = []
+seq_scatter_time_list = []
+
 
 def apply_gamma(img_array, gamma=0.5):
     img_min, img_max = img_array.min(), img_array.max()
@@ -377,6 +387,38 @@ def get_mask_for_metrics(mask_seq, t_len, use_mask_mode):
         # No mask for metrics
         return np.ones((mask_seq.shape[2], mask_seq.shape[3]))  # All ones = all valid
 
+
+def apply_sensor_noise(img_array):
+    """
+    Simulates physical sensor noise: Dark Current, Read Noise, and 10-bit Quantization.
+    Faithful to original parameters.
+    """
+    CONVERSION_FACTOR = 178.6304426659069
+    EXPOSURE_TIME_US = 205
+    DARK_CURRENT_RATE = 4.72 * 1e-6  # e-/sec
+    FULL_WELL_CAPACITY = 10600
+    BIT_DEPTH_FACTOR = 1024  # 10-bit
+
+    # Radiance to Electrons
+    electrons = img_array * CONVERSION_FACTOR
+
+    # Dark Current Noise (Gaussian)
+    dark_noise_mean = DARK_CURRENT_RATE * EXPOSURE_TIME_US
+    dn_noise = np.random.normal(loc=dark_noise_mean, scale=dark_noise_mean ** 0.5, size=electrons.shape)
+    electrons += dn_noise
+
+    # Read Noise (Gaussian, mean=0)
+    read_noise = np.random.normal(loc=0.0, scale=5.29 ** 0.5, size=electrons.shape)
+    electrons += read_noise
+
+    # Clipping & Quantization
+    electrons = np.clip(electrons, a_min=0, a_max=FULL_WELL_CAPACITY)
+    dn = electrons * (BIT_DEPTH_FACTOR / FULL_WELL_CAPACITY)
+    electrons_quantized = np.round(dn) * (FULL_WELL_CAPACITY / BIT_DEPTH_FACTOR)
+
+    # Back to Radiance (as expected by model input)
+    radiance = electrons_quantized / CONVERSION_FACTOR
+    return radiance.astype(np.float32)
 
 def set_centered_meter_axis(ax, height, width, m_per_pixel=20):
     """
@@ -523,9 +565,37 @@ def save_geo_2d_pdf(sat_positions, look_at, fixed_bounds, out_path, title):
     plt.close(fig)
 
 
+# for t_len in range(1, T + 1):
+#     # Prepare input
+#     x_input = input_seq[:t_len].unsqueeze(0).to(DEVICE)
+#
+#     with torch.no_grad():
+#         with autocast(device_type=DEVICE.type, enabled=(DEVICE.type == "cuda")):
+#             output, _ = model(x_input)
+#
+#     if isinstance(output, list):
+#         pred_tensor = torch.stack(output, dim=1)
+#     else:
+#         pred_tensor = output
+#
+#     pred_vel = pred_tensor.squeeze(0).cpu().numpy()
+#     pred_vel_denorm = train_dataset_for_norm.denormalize(pred_vel)
+
 for t_len in range(1, T + 1):
-    # Prepare input
-    x_input = input_seq[:t_len].unsqueeze(0).to(DEVICE)
+    # Slice the input sequence for the current time step
+    input_slice = input_seq[:t_len].clone()
+
+    # Apply sensor noise if enabled in configuration
+    if ADD_SENSOR_NOISE:
+        # Convert to numpy to apply the sensor noise logic (Dark current, Read noise, Quantization)
+        np_slice = input_slice.cpu().numpy()
+        for t in range(t_len):
+            for c in range(np_slice.shape[1]):
+                np_slice[t, c] = apply_sensor_noise(np_slice[t, c])
+        input_slice = torch.from_numpy(np_slice)
+
+    # Prepare input for the model
+    x_input = input_slice.unsqueeze(0).to(DEVICE)
 
     with torch.no_grad():
         with autocast(device_type=DEVICE.type, enabled=(DEVICE.type == "cuda")):
@@ -538,7 +608,6 @@ for t_len in range(1, T + 1):
 
     pred_vel = pred_tensor.squeeze(0).cpu().numpy()
     pred_vel_denorm = train_dataset_for_norm.denormalize(pred_vel)
-
     # Get Last Frame Data
     last_idx = t_len - 1
 
@@ -566,6 +635,24 @@ for t_len in range(1, T + 1):
 
     # --- Metrics Calculation ---
     diff_map = pred_frame - gt_frame
+
+    # --- Collect values for per-sequence scatter plot ---
+    if USE_MASK is True:
+        valid_pixels_seq = mask_frame_metrics > 0.1
+        if np.any(valid_pixels_seq):
+            seq_gt_vals = gt_frame[valid_pixels_seq]
+            seq_pred_vals = pred_frame[valid_pixels_seq]
+            seq_time_vals = np.full(seq_gt_vals.shape, last_idx, dtype=np.int32)
+            seq_scatter_gt_list.append(seq_gt_vals)
+            seq_scatter_pred_list.append(seq_pred_vals)
+            seq_scatter_time_list.append(seq_time_vals)
+    else:
+        seq_gt_vals = gt_frame.flatten()
+        seq_pred_vals = pred_frame.flatten()
+        seq_time_vals = np.full(seq_gt_vals.shape, last_idx, dtype=np.int32)
+        seq_scatter_gt_list.append(seq_gt_vals)
+        seq_scatter_pred_list.append(seq_pred_vals)
+        seq_scatter_time_list.append(seq_time_vals)
 
     if USE_MASK is True:
         # Binary mask mode: metrics only on masked regions
@@ -861,3 +948,81 @@ if 'video_writer' in globals() and video_writer is not None:
     print(f"Average MAE:        {np.mean(seq_mae):.4f}")
     print(f"Average RMSE:       {np.mean(seq_rmse):.4f}")
     print(f"Average Mean Error: {np.mean(seq_mean_err):.4f}")
+
+    # --- Per-sequence scatter plotting (balanced sampling like get_metrics) ---
+    if len(seq_scatter_gt_list) > 0:
+        all_gt_seq = np.concatenate(seq_scatter_gt_list)
+        all_pred_seq = np.concatenate(seq_scatter_pred_list)
+        all_time_seq = np.concatenate(seq_scatter_time_list)
+
+        all_diff_seq = all_pred_seq - all_gt_seq
+
+        def sample_scatter_points(gt_vals, pred_vals, label_suffix=""):
+            bins = np.arange(SCATTER_RANGE[0], SCATTER_RANGE[1] + SCATTER_BIN_WIDTH, SCATTER_BIN_WIDTH)
+            bin_indices = np.digitize(gt_vals, bins)
+            selected_indices = []
+            unique_bins = np.unique(bin_indices)
+
+            for b_idx in unique_bins:
+                points_in_bin = np.where(bin_indices == b_idx)[0]
+                n_sample = min(len(points_in_bin), POINTS_PER_BIN)
+                if n_sample > 0:
+                    chosen = np.random.choice(points_in_bin, size=n_sample, replace=False)
+                    selected_indices.append(chosen)
+
+            if len(selected_indices) > 0:
+                final_indices = np.concatenate(selected_indices)
+                np.random.shuffle(final_indices)
+                x_scatter = gt_vals[final_indices]
+                y_scatter = pred_vals[final_indices]
+                print(f"[INFO] Selected {len(x_scatter)} points total for balanced scatter plot{label_suffix}.")
+            else:
+                print(f"[WARNING] Sampling failed{label_suffix}, using all points.")
+                x_scatter = gt_vals
+                y_scatter = pred_vals
+
+            scatter_min = gt_vals.min() if gt_vals.size else -1.0
+            scatter_max = gt_vals.max() if gt_vals.size else 1.0
+            scatter_range_data = max(abs(scatter_min), abs(scatter_max))
+            scatter_range_padded = scatter_range_data * 1.1
+            return x_scatter, y_scatter, scatter_min, scatter_max, scatter_range_padded
+
+        # All time steps scatter
+        x_s, y_s, smin, smax, srange = sample_scatter_points(all_gt_seq, all_pred_seq, " (sequence)")
+        fig_s, ax_s = plt.subplots(figsize=(12, 12), dpi=150)
+        ax_s.scatter(x_s, y_s, c='tab:blue', s=40, alpha=0.4)
+        ax_s.plot([-srange, srange], [-srange, srange], 'k--', lw=2)
+        ax_s.set_xlabel("Ground Truth [m/s]")
+        ax_s.set_ylabel("Predicted [m/s]")
+        ax_s.set_title(f"Balanced Scatter Plot (Sequence {SEQUENCE_IDX})")
+        ax_s.set_xlim(-srange, srange)
+        ax_s.set_ylim(-srange, srange)
+        ax_s.grid(True, alpha=0.3)
+        plt.tight_layout()
+        os.makedirs(video_path, exist_ok=True)
+        scatter_seq_path = os.path.join(video_path, f"seq{SEQUENCE_IDX}_scatter.pdf")
+        plt.savefig(scatter_seq_path, dpi=150)
+        plt.close(fig_s)
+        print(f"  Saved: {os.path.basename(scatter_seq_path)}")
+
+        # Time-step 5 (if present)
+        t5_mask = (all_time_seq == 5)
+        if np.any(t5_mask):
+            x5, y5 = all_gt_seq[t5_mask], all_pred_seq[t5_mask]
+            x_s5, y_s5, smin5, smax5, srange5 = sample_scatter_points(x5, y5, " (t=5)")
+            fig_s5, ax_s5 = plt.subplots(figsize=(12, 12), dpi=150)
+            ax_s5.scatter(x_s5, y_s5, c='tab:blue', s=30, alpha=0.4)
+            ax_s5.plot([-srange5, srange5], [-srange5, srange5], 'k--', lw=2)
+            ax_s5.set_xlabel("Ground Truth [m/s]")
+            ax_s5.set_ylabel("Predicted [m/s]")
+            ax_s5.set_title(f"Balanced Scatter Plot (Sequence {SEQUENCE_IDX} - t=5)")
+            ax_s5.set_xlim(-srange5, srange5)
+            ax_s5.set_ylim(-srange5, srange5)
+            ax_s5.grid(True, alpha=0.3)
+            plt.tight_layout()
+            scatter_seq_t5_path = os.path.join(video_path, f"seq{SEQUENCE_IDX}_scatter_t5.pdf")
+            plt.savefig(scatter_seq_t5_path, dpi=150)
+            plt.close(fig_s5)
+            print(f"  Saved: {os.path.basename(scatter_seq_t5_path)}")
+        else:
+            print("[INFO] No samples for t=5 in this sequence; skipped t=5 scatter.")

@@ -17,19 +17,22 @@ def get_csv_indices_grouped_by_time(csv_path):
         
     return unique_times, time_to_indices
 
-def main(start_folder_name=None, end_folder_name=None):
+def main(start_folder_name=None, end_folder_name=None, sample_number=None):
     # ==========================================
     # 1. CONFIGURATION
     # ==========================================
-    input_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_beta,U,V,W_fixed/'
-    output_root = '/wdata_visl/danino/dataset_rendered_data_spp8192_g085/' 
+    input_root = '/wdata_visl/danino/BOMEX_1CLD_256x200_20m_processed/'
+    output_root = '/wdata_visl/danino/BOMEX_1CLD_256x200_20m_processed_render/' 
     csv_path = '/home/danino/PycharmProjects/pythonProject/data/Dor_2satellites_overpass.csv'
     
     SPP = 8192
     RES = 256
     G_VALUE = 0.85
-    start_folder_name = '0000006240'
-    end_folder_name = '0000010000'
+    start_folder_name = '0000002120'
+    end_folder_name = '0000002160'
+    
+    # Render specific sample from each time step (use the function parameter)
+    SAMPLE_NUMBER = 4 # None for all samples, or pass sample_number=40 to filter for sample_040
     # ==========================================
     # 2. SETUP DATA & FOLDERS
     # ==========================================
@@ -104,6 +107,17 @@ def main(start_folder_name=None, end_folder_name=None):
         
         if not pkl_files:
             continue # Skip empty folders
+        
+        # Filter for specific sample number if specified
+        if SAMPLE_NUMBER is not None:
+            # Filter for files containing sample_NNN where NNN matches SAMPLE_NUMBER
+            sample_pattern = f"sample_{SAMPLE_NUMBER:03d}"
+            matching_files = [f for f in pkl_files if sample_pattern in f]
+            if matching_files:
+                pkl_files = matching_files
+            else:
+                print(f"Warning: No files matching '{sample_pattern}' found in {current_input_dir}")
+                continue
 
         # D. Initialize Renderer
         renderer = MitsubaRenderer(
@@ -199,4 +213,9 @@ def main(start_folder_name=None, end_folder_name=None):
             os.remove(temp_vol_path)
 
 if __name__ == "__main__":
+    # Options:
+    # 1. Render all pkl files from each time step (default):
+    #    main()
+    # 2. Render specific sample from each time step (e.g., sample_040):
+    #    main(sample_number=40)
     main()

@@ -87,6 +87,7 @@ print(f"Calculated Delta_t for max {MAX_ELECTRONS}e-: {delta_t:.6f} seconds ({de
 # u_e = Radiance * C_eff * Delta_t
 conversion_factor = C_EFF * delta_t
 image_stack_electrons = image_stack_radiance * conversion_factor  #
+print(f"conversion_factor : {conversion_factor}")
 
 # 3. Calculate Mean and Variance in Electron units
 valid_mask = np.mean(image_stack_electrons, axis=0) > 0

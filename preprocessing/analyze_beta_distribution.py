@@ -187,7 +187,7 @@ def create_mean_median_plot(aggregated_beta_by_z, n_z, output_dir):
 # --- Run Configuration ---
 if __name__ == "__main__":
     # Input and output paths
-    input_directory = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)/'
+    input_directory = '/wdata_visl/danino/BOMEX_1CLD_512x320_10m_500CCN_Reg_512/'
     output_directory = '/home/danino/PycharmProjects/pythonProject/preprocessing/beta_analysis/'
 
     # Configuration for random sampling

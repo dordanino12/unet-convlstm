@@ -39,7 +39,7 @@ from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, 
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK = True
+USE_MASK = False
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
 BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
@@ -49,18 +49,19 @@ USE_ONE_SATELLITE = False
 
 
 # Paths
-NPZ_TRAIN_PATH = "data/fix_leak_data_noised_5precent/dataset_envelop_w_fix_leak_train_w.npz"
-NPZ_TEST_PATH = "data/fix_leak_data_noised_5precent/dataset_envelop_w_fix_leak_test_w.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/nolstm/mit_b1_envelop_data_leakag_fix_no_conv_lstm_best_bin_loss.pt"
+NPZ_TRAIN_PATH = "/home/danino/PycharmProjects/pythonProject/data/data_3pre_noise/data_3pre_noise_train_w_noise_view0_3pct.npz"
+NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/data_3pre_noise/data_3pre_noise_test_w_noise_view0_3pct.npz"
+CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/data_fix/mit_b1_1000m_leakag_fix_noised_best_bin_loss.pt"
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 # Option to disable ConvLSTM temporal processing entirely
-USE_CONV_LSTM = False
+USE_CONV_LSTM = True
+ADD_SENSOR_NOISE = False  #
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
 SCATTER_BIN_WIDTH = 0.02  # Width of each velocity bin (e.g., 0.5 m/s)
-POINTS_PER_BIN = 20  # How many points to sample from each bin (The "X" you requested)
+POINTS_PER_BIN = 10 #How many points to sample from each bin (The "X" you requested)
 SCATTER_RANGE = (-8.5, 8.5)  # Range to define bins over
 
 HIST_BINS = 100  # Number of bins for histograms
@@ -79,13 +80,16 @@ train_dataset_for_norm = NPZSequenceDataset(
 )
 
 # Load test dataset for evaluation
-full_dataset = NPZSequenceDataset(
+test_set = NPZSequenceDataset(
     NPZ_TEST_PATH,
     use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
     gt_envelope_npz_path=NPZ_TEST_PATH,
     use_one_satellite=USE_ONE_SATELLITE
 )
-_, C, _, _ = full_dataset[0][0].shape
+# Match test normalization to train normalization for consistent metric denormalization.
+test_set.scale = train_dataset_for_norm.scale
+test_set.norm_const = train_dataset_for_norm.norm_const
+_, C, _, _ = test_set[0][0].shape
 
 # -----------------------------
 # 3. Load Model Logic
@@ -105,7 +109,7 @@ else:
     model_in_channels = cfg.get('in_channels', C)
 
 # If checkpoint expects single-satellite but dataset was loaded as two-sat, reload datasets
-if ckpt_use_one_sat and not getattr(full_dataset, 'use_one_satellite', False):
+if ckpt_use_one_sat and not getattr(test_set, 'use_one_satellite', False):
     print('[INFO] Checkpoint indicates single-satellite input; reloading datasets in single-sat mode')
     train_dataset_for_norm = NPZSequenceDataset(
         NPZ_TRAIN_PATH,
@@ -113,13 +117,15 @@ if ckpt_use_one_sat and not getattr(full_dataset, 'use_one_satellite', False):
         gt_envelope_npz_path=NPZ_TRAIN_PATH,
         use_one_satellite=True
     )
-    full_dataset = NPZSequenceDataset(
+    test_set = NPZSequenceDataset(
         NPZ_TEST_PATH,
         use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
         gt_envelope_npz_path=NPZ_TEST_PATH,
         use_one_satellite=True
     )
-    _, C, _, _ = full_dataset[0][0].shape
+    test_set.scale = train_dataset_for_norm.scale
+    test_set.norm_const = train_dataset_for_norm.norm_const
+    _, C, _, _ = test_set[0][0].shape
 
 # Auto-detect if checkpoint has refiner weights
 checkpoint_state = checkpoint['model_state']
@@ -196,34 +202,74 @@ else:
     print(f"[INFO] ✗ Refiner DISABLED (checkpoint has no refiner weights)")
 
 
-# Re-create the split exactly as in training (0% train, 15% val, 15% test)
-n_total = len(full_dataset)
-n_train = int(0.8 * n_total)
-n_val = int(0.1 * n_total)
-n_test = n_total - n_train - n_val
-
-# Use the same seed generator as in training
-generator = torch.Generator().manual_seed(42)
-train_ds, val_ds, test_ds = torch.utils.data.random_split(full_dataset, [n_train, n_val, n_test], generator=generator)
-
-# Evaluate on TEST set
-eval_ds = test_ds
-print(f"[INFO] Dataset loaded. Evaluating on TEST set only ({len(eval_ds)} sequences)")
+# Evaluate on FULL NPZ_TEST_PATH dataset (no random splits)
+# This ensures all metrics come from NPZ_TEST_PATH only
+eval_ds = test_set
+print(f"[INFO] Dataset loaded. Evaluating on FULL NPZ_TEST_PATH ({len(eval_ds)} sequences)")
 
 # Lists to store pixel values
 scatter_gt_list = []
 scatter_pred_list = []
 scatter_time_list = []
+def apply_sensor_noise(img_array):
+    """
+    Simulates physical sensor noise: Dark Current, Read Noise, and 10-bit Quantization.
+    Faithful to original parameters.
+    """
+    CONVERSION_FACTOR = 178.6304426659069
+    EXPOSURE_TIME_US = 205
+    DARK_CURRENT_RATE = 4.72 * 1e-6  # e-/sec
+    FULL_WELL_CAPACITY = 10600
+    BIT_DEPTH_FACTOR = 1024  # 10-bit
+
+    # Radiance to Electrons
+    electrons = img_array * CONVERSION_FACTOR
+
+    # Dark Current Noise (Gaussian)
+    dark_noise_mean = DARK_CURRENT_RATE * EXPOSURE_TIME_US
+    dn_noise = np.random.normal(loc=dark_noise_mean, scale=dark_noise_mean ** 0.5, size=electrons.shape)
+    electrons += dn_noise
+
+    # Read Noise (Gaussian, mean=0)
+    read_noise = np.random.normal(loc=0.0, scale=5.29 ** 0.5, size=electrons.shape)
+    electrons += read_noise
+
+    # Clipping & Quantization
+    electrons = np.clip(electrons, a_min=0, a_max=FULL_WELL_CAPACITY)
+    dn = electrons * (BIT_DEPTH_FACTOR / FULL_WELL_CAPACITY)
+    electrons_quantized = np.round(dn) * (FULL_WELL_CAPACITY / BIT_DEPTH_FACTOR)
+
+    # Back to Radiance (as expected by model input)
+    radiance = electrons_quantized / CONVERSION_FACTOR
+    return radiance.astype(np.float32)
 
 print("[INFO] Starting evaluation...")
 
+# for i in tqdm(range(len(eval_ds)), desc="Evaluating"):
+#
+#     # Get item from Test Dataset
+#     input_seq, gt_vel_seq, mask_seq = eval_ds[i]
+#
+#     x_input = input_seq.unsqueeze(0).to(DEVICE)
+
 for i in tqdm(range(len(eval_ds)), desc="Evaluating"):
 
-    # Get item from Test Dataset
+    # 1. Get item from Test Dataset
     input_seq, gt_vel_seq, mask_seq = eval_ds[i]
 
-    x_input = input_seq.unsqueeze(0).to(DEVICE)
+    # --- NEW: Noise Support ---
+    if ADD_SENSOR_NOISE:
+        # Clone and move to CPU/Numpy to apply sensor effects
+        input_np = input_seq.clone().cpu().numpy()  # Shape: (T, C, H, W)
+        T, C, H, W = input_np.shape
+        for t in range(T):
+            for c in range(C):
+                input_np[t, c] = apply_sensor_noise(input_np[t, c])
+        # Convert back to tensor
+        input_seq = torch.from_numpy(input_np)
+    # ---------------------------
 
+    x_input = input_seq.unsqueeze(0).to(DEVICE)
     with torch.no_grad():
         output, _ = model(x_input)
 
@@ -235,7 +281,7 @@ for i in tqdm(range(len(eval_ds)), desc="Evaluating"):
     pred_vel = pred_tensor.squeeze(0).cpu().numpy()
 
     # Denormalize GT using test dataset stats, predictions using train dataset stats
-    gt_vel_denorm = full_dataset.denormalize(gt_vel_seq)
+    gt_vel_denorm = test_set.denormalize(gt_vel_seq)
     pred_vel_denorm = train_dataset_for_norm.denormalize(pred_vel)
 
     # --- Masking Logic ---
@@ -278,6 +324,7 @@ for i in tqdm(range(len(eval_ds)), desc="Evaluating"):
 # -----------------------------
 # 4. Global Stats & Plotting
 # -----------------------------
+
 
 if len(scatter_gt_list) > 0:
     # Concatenate all pixels

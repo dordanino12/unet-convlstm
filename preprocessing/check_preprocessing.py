@@ -62,7 +62,8 @@ def visualize_cloud_mesh(beta_array, title="Cloud Surface", save_path=None, down
     d_z, d_y, d_x = beta_array.shape
     ax1.set_xlim(0, d_x)
     ax1.set_ylim(0, d_y)
-    ax1.set_zlim(0, min(100, d_z))
+    #ax1.set_zlim(0, min(100, d_z))
+    ax1.set_zlim(0, d_z)
     
     # Right: 2D side view (Y-Z plane, looking from X direction)
     ax2 = fig.add_subplot(122)
@@ -72,7 +73,7 @@ def visualize_cloud_mesh(beta_array, title="Cloud Surface", save_path=None, down
     
     # Display the side view
     im = ax2.imshow(side_view, cmap='Blues', aspect='auto', origin='lower',
-                    extent=[0, d_y, 0, min(100, d_z)])
+                    extent=[0, d_y, 0, d_z])
     ax2.set_xlabel('Y (Depth)')
     ax2.set_ylabel('Z (Height)')
     ax2.set_title(f"2D Side View (X-projection): {title}")
@@ -108,8 +109,8 @@ def inspect_and_visualize(folder_path, specific_file, save_dir=None):
 
 
 # --- Run ---
-dataset_folder = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000007000/'
+dataset_folder = '/wdata_visl/danino/BOMEX_1CLD_256x200_20m_processed/0000003420/'
 save_folder = './cloud_visualizations'  # Set to None to disable saving
 
 # Increase downsample_factor (e.g., 4) for even faster processing
-inspect_and_visualize(dataset_folder, "sample_010.pkl", save_dir=save_folder)
+inspect_and_visualize(dataset_folder, "sample_004.pkl", save_dir=save_folder)

@@ -71,7 +71,7 @@ csv_file = '/home/danino/PycharmProjects/pythonProject/data/debug.csv'
 
 #cloud_data_file = '/wdata_visl/udigal/samples/samples_mode3_res128_stride64_spp8/samples_3D/BOMEX_512x512x200_20m_20m_1s_512_0000005200_1_5'  # This is the pkl file you have
 #cloud_data_file= "/wdata_visl/danino/dataset_256x256x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000002000/sample_001.pkl"
-cloud_data_file= '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_beta,U,V,W_fixed/0000005920/sample_012.pkl'
+cloud_data_file= '/wdata_visl/danino/BOMEX_1CLD_256x200_20m_processed/0000003420/sample_004.pkl'
 #cloud_data_file= "/wdata_visl/danino/dataset_512x512x200_overlap_64_stride_7x7_split(beta,U,V,W)/0000002000/sample_000.pkl"
 
 output_vol_file = 'temp/my_cloud.vol'  # A temporary file this script will create
@@ -86,7 +86,7 @@ overpass_indices = [14,15]  # Adjust this list based on how many timestamps/sate
 renderer_params = {
     'overpass_csv': csv_file,
     'overpass_indices': overpass_indices,
-    'spp': 8192,
+    'spp': 512,# 8192,
     'g_value': 0.85,
     'cloud_width': 128,
     'image_res': 256,

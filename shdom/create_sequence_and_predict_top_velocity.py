@@ -1,24 +1,101 @@
 import os
 import sys
 import pickle
+import re
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import cv2
 
 # Add parent directory to path to import train module
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(script_dir)
 sys.path.insert(0, project_root)
-from train.resnet18 import PretrainedTemporalUNetMitB1
+from train.resnet18 import (
+    PretrainedTemporalUNetMitB1, 
+    PretrainedTemporalUNetMitB2,
+    PretrainedTemporalUNetMitB3,
+    PretrainedTemporalUNet
+)
 
 # --- CONFIG ---
-#pkl_dir = os.path.join(project_root, 'data/output/satellite_output_steps/')
-#pkl_dir = "/wdata_visl/vhold/backup_from_133/CEIL/CELINE_2021/satellite_output_steps_weak_sea_low_angular_res_256pixelres/"
 pkl_dir = "/wdata_visl/vhold/backup_from_133/CEIL/CELINE_2021/satellite_output_steps_no_sea_low_angular_res_256pixelres_10000-10220/"
 gt_base_dir = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,reff,lwc,U,V,W)_fixed_to_shdom/10000_10220_1000m_vel/'
-model_path = os.path.join(project_root, 'models/data_fix/mit_b1_1000m_data_leakag_fix_noised_with_augment_best_bin_loss.pt')
+
+#pkl_dir = '/wdata_visl/vhold/backup_from_133/CEIL/CELINE_2021/satellite_output_steps_no_sea_low_angular_res_256pixelres_5920_6140/'
+#gt_base_dir = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,reff,lwc,U,V,W)_fixed_to_shdom/1000m_vel/'
+
+#pkl_dir = "/wdata_visl/vhold/backup_from_133/CEIL/CELINE_2021/satellite_output_steps_18000-18220_low_angular_res/"
+#gt_base_dir = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,reff,lwc,U,V,W)_fixed_to_shdom/18000_18220_1000m_vel/'
+
+model_path = os.path.join(project_root, 'models/data_fix/mit_b1_1000m_leakag_fix_noised_best_bin_loss.pt')
 output_dir = script_dir  # Output video to script directory
+
+# --- PDF Configuration ---
+SAVE_PDF_SECTIONS = True
+PDF_BASE_DIR = os.path.join(output_dir, 'frames_pdf')
+PDF_FIG_SIZE = (12, 12)
+PDF_DPI = 150
+PDF_AX_POS = [0.17, 0.10, 0.70, 0.75]
+PDF_SUBPLOT_ADJUST = dict(left=0.17, right=0.88, top=0.95, bottom=0.08)
+PDF_CBAR_PAD = 0.015
+PDF_CBAR_WIDTH = 0.035
+PDF_CBAR_HEIGHT = 0.80
+
+def detect_model_type_from_path(path):
+    """Auto-detect model type from file path."""
+    path_lower = path.lower()
+    if 'resnet' in path_lower:
+        return 'resnet18'
+    if 'mit_b3' in path_lower or 'b3' in path_lower:
+        return 'mit_b3'
+    if 'mit_b2' in path_lower or 'b2' in path_lower:
+        return 'mit_b2'
+    if 'mit_b1' in path_lower or 'b1' in path_lower:
+        return 'mit_b1'
+    return 'mit_b1'  # Fallback to mit_b1
+
+
+def create_model(model_type, in_channels=2, out_channels=1):
+    """Factory function to create the appropriate model."""
+    model_type = model_type.lower()
+    
+    if model_type == 'resnet18':
+        print(f'[INFO] Creating ResNet18-based model...')
+        model = PretrainedTemporalUNet(
+            out_channels=out_channels,
+            lstm_layers=1,
+            freeze_encoder=True,
+            in_channels=in_channels,
+            dropout_p=0.3,
+            use_conv_lstm=True
+        )
+    elif model_type == 'mit_b3':
+        print(f'[INFO] Creating MiT-B3-based model...')
+        model = PretrainedTemporalUNetMitB3(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            lstm_layers=1,
+            freeze_encoder=True,
+            dropout_p=0.3
+        )
+    elif model_type == 'mit_b2':
+        print(f'[INFO] Creating MiT-B2-based model...')
+        model = PretrainedTemporalUNetMitB2(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            lstm_layers=1,
+            freeze_encoder=True,
+            dropout_p=0.2
+        )
+    elif model_type == 'mit_b1':
+        print(f'[INFO] Creating MiT-B1-based model...')
+        model = PretrainedTemporalUNetMitB1(in_channels=in_channels, out_channels=out_channels)
+    else:
+        raise ValueError(f'Unknown model type: {model_type}. Choose from: resnet18, mit_b1, mit_b2, mit_b3')
+    
+    return model
 
 
 def determine_movie_level_from_model_path():
@@ -49,22 +126,126 @@ def determine_use_mask_from_model_path():
 USE_MASK = determine_use_mask_from_model_path()
 print(f'[INFO] USE_MASK={USE_MASK} (from model_path)')
 
+MASK_THRESHOLD = 1.1 if 'mitsuba' in pkl_dir.lower() else 0.01
+if 'mitsuba' in pkl_dir.lower():
+    print(f'[INFO] Mitsuba input detected, using mask threshold={MASK_THRESHOLD}')
+
 # --- Load PKL images as sequence with 2 channels per timestep ---
-pkl_files = sorted([f for f in os.listdir(pkl_dir) if f.endswith('.pkl')])
+pkl_files = []
+for dirpath, _, filenames in os.walk(pkl_dir):
+    for fname in filenames:
+        if fname.endswith('.pkl'):
+            full_path = os.path.join(dirpath, fname)
+            rel_path = os.path.relpath(full_path, pkl_dir)
+            pkl_files.append(rel_path)
+pkl_files = sorted(pkl_files)
+
+if not pkl_files:
+    raise RuntimeError(f'No PKL files found in {pkl_dir} (including subfolders)')
+
+print(f'[INFO] Found {len(pkl_files)} pkl files. Checking format...')
+
+# Debug: print first few files and their structure
+for i, pkl_file in enumerate(pkl_files[:3]):
+    with open(os.path.join(pkl_dir, pkl_file), 'rb') as f:
+        data = pickle.load(f)
+    print(f'[DEBUG] {pkl_file}: type={type(data)}, keys={list(data.keys()) if isinstance(data, dict) else "N/A"}')
+
 sequence = []
 seq_files = []  # filenames corresponding to frames in `sequence`
+
+# Detect file format (old format: sat1_image/sat2_image, new format: render)
+is_new_format = None
+
+# For Mitsuba format, accumulate one frame per (step/time/sample) with per-view channels.
+mitsuba_groups = {}
+
+
+def render_to_single_channel(img):
+    """Convert Mitsuba render output to a single 2D channel."""
+    arr = np.asarray(img)
+    if arr.ndim == 2:
+        return arr
+    if arr.ndim == 3:
+        # Common case: RGB/RGBA image -> grayscale channel for this satellite view.
+        if arr.shape[-1] >= 3:
+            return np.mean(arr[..., :3], axis=-1)
+        return arr[..., 0]
+    return np.squeeze(arr)
+
 for pkl_file in pkl_files:
     with open(os.path.join(pkl_dir, pkl_file), 'rb') as f:
         data = pickle.load(f)
-    if isinstance(data, dict) and 'sat1_image' in data and 'sat2_image' in data:
-        img = np.stack([data['sat1_image'], data['sat2_image']], axis=0)  # (2, H, W)
-        sequence.append(img)
-        seq_files.append(pkl_file)
+    
+    if isinstance(data, dict):
+        # Try new format (Mitsuba render output): single 'render' key
+        if 'render' in data:
+            if is_new_format is None:
+                is_new_format = True
+                print(f'[INFO] Detected new format (Mitsuba render output)')
+
+            base_name = os.path.basename(pkl_file)
+            sample_match = re.search(r'sample_(\d+)_', base_name)
+            time_match = re.search(r'_time_(\d+)_', base_name)
+            view_match = re.search(r'_view_(\d+)', base_name)
+
+            if view_match is None:
+                print(f'[WARNING] Mitsuba file missing view index, skipping: {pkl_file}')
+                continue
+
+            sample_num = int(sample_match.group(1)) if sample_match else 40
+            time_idx = int(time_match.group(1)) if time_match else -1
+            view_idx = int(view_match.group(1))
+
+            parent_dir = os.path.basename(os.path.dirname(pkl_file))
+            step_num = int(parent_dir) if parent_dir.isdigit() else -1
+
+            frame_key = (step_num, time_idx, sample_num)
+            if frame_key not in mitsuba_groups:
+                mitsuba_groups[frame_key] = {
+                    'views': {},
+                    'view_files': {}
+                }
+
+            mitsuba_groups[frame_key]['views'][view_idx] = render_to_single_channel(data['render'])
+            mitsuba_groups[frame_key]['view_files'][view_idx] = pkl_file
+        # Try old format: sat1_image and sat2_image keys
+        elif 'sat1_image' in data and 'sat2_image' in data:
+            if is_new_format is None:
+                is_new_format = False
+                print(f'[INFO] Detected old format (satellite output)')
+            img = np.stack([data['sat1_image'], data['sat2_image']], axis=0)  # (2, H, W)
+            sequence.append(img)
+            seq_files.append(pkl_file)
+        else:
+            print(f'PKL file {pkl_file} has unrecognized format. Keys: {list(data.keys())}')
     else:
-        print(f'PKL missing sat1_image or sat2_image in {pkl_file}')
+        print(f'PKL file {pkl_file} is not a dict: {type(data)}')
+
+# Finalize Mitsuba grouped frames: require at least view_0 and view_1.
+if is_new_format and len(mitsuba_groups) > 0:
+    sequence = []
+    seq_files = []
+    missing_pairs = 0
+
+    for frame_key in sorted(mitsuba_groups.keys()):
+        group = mitsuba_groups[frame_key]
+        views = group['views']
+        if 0 in views and 1 in views:
+            img = np.stack([views[0], views[1]], axis=0)  # (2, H, W)
+            sequence.append(img)
+            seq_files.append(group['view_files'][0])  # representative file for GT parsing
+        else:
+            missing_pairs += 1
+
+    if missing_pairs > 0:
+        print(f'[WARNING] Skipped {missing_pairs} Mitsuba frames missing view_0/view_1 pairs.')
 
 if len(sequence) == 0:
-    raise RuntimeError('No valid PKL files found with sat1_image and sat2_image.')
+    raise RuntimeError('No valid PKL files found. Expected either "render" key (new format) or "sat1_image"/"sat2_image" keys (old format).')
+
+format_name = 'new (Mitsuba render)' if is_new_format else 'old (satellite output)'
+print(f'[INFO] Loaded {len(sequence)} valid PKL files ({format_name})')
 
 sequence = np.stack(sequence, axis=0)  # (T, 2, H, W)
 np.save(temp_sequence_npy, sequence)
@@ -77,6 +258,40 @@ np.save(temp_sequence_npy, sequence)
 
 def step_to_time(step_num):
     return step_num * 20
+
+
+def parse_step_time_sample(seq_file):
+    """Parse step/time/sample from either old or Mitsuba-style filenames."""
+    base_name = os.path.basename(seq_file)
+    parent_dir = os.path.basename(os.path.dirname(seq_file))
+
+    step_num = None
+    time_idx = None
+    sample_num = 40
+
+    # Old format: step_0001.pkl
+    if base_name.startswith('step_') and base_name.endswith('.pkl'):
+        raw = base_name.replace('step_', '').replace('.pkl', '')
+        if raw.isdigit():
+            step_num = int(raw)
+
+    # New format: step from parent directory (e.g. .../0000002000/sample_...)
+    if step_num is None and parent_dir.isdigit():
+        step_num = int(parent_dir)
+
+    # Sample from filename if present (e.g. sample_040_...)
+    sample_match = re.search(r'sample_(\d+)_', base_name)
+    if sample_match:
+        sample_num = int(sample_match.group(1))
+
+    # Time from filename if present (e.g. _time_7028_)
+    time_match = re.search(r'_time_(\d+)_', base_name)
+    if time_match:
+        time_idx = int(time_match.group(1))
+    elif step_num is not None:
+        time_idx = step_to_time(step_num)
+
+    return step_num, time_idx, sample_num
 
 
 def determine_gt_suffix_from_model_path():
@@ -144,12 +359,17 @@ def to_2d_gt_map(gt_img, target_shape):
 gt_sequence = []
 for pkl_file in seq_files:
     try:
-        step_num = int(pkl_file.replace('step_', '').replace('.pkl', ''))
-        time_idx = step_to_time(step_num)
+        step_num, time_idx, sample_num = parse_step_time_sample(pkl_file)
+
+        if step_num is None or time_idx is None:
+            gt_sequence.append(None)
+            print(f'Could not infer step/time for GT from: {pkl_file}')
+            continue
+
         gt_path = os.path.join(
             gt_base_dir,
             f'{step_num:010d}',
-            f'sample_040_time_{time_idx}_view_0_{gt_suffix}.pkl'
+            f'sample_{sample_num:03d}_time_{time_idx}_view_0_{gt_suffix}.pkl'
         )
 
         if not os.path.exists(gt_path):
@@ -180,16 +400,26 @@ for pkl_file in seq_files:
 
 # --- Normalize input sequence using norm_const (max or 1.0) ---
 sequence = sequence.astype(np.float32)
-sequence_shdom_to_mitusuba = sequence * 131.4 * np.cos(np.deg2rad(35))
+is_mitsuba_input = 'mitsuba' in pkl_dir.lower()
+if is_mitsuba_input:
+    print('[INFO] Mitsuba input detected from pkl_dir, skipping SHDOM->Mitsuba scaling.')
+    sequence_shdom_to_mitsuba = sequence
+else:
+    sequence_shdom_to_mitsuba = sequence * 131.4 * np.cos(np.deg2rad(35))
 norm_const = 31.22 # this the norm that we do in the train
-sequence_norm = sequence_shdom_to_mitusuba / norm_const
+sequence_norm = sequence_shdom_to_mitsuba / norm_const
 
 # --- Prepare input for model ---
 # Model expects (B, T, C, H, W), here C=2
 input_seq = torch.from_numpy(sequence_norm).float().unsqueeze(0).to(device)  # (1, T, 2, H, W)
 
 # --- Load model ---
-model = PretrainedTemporalUNetMitB1(in_channels=2, out_channels=1)
+# Auto-detect model type from model path
+detected_type = detect_model_type_from_path(model_path)
+print(f'[INFO] Model path: {model_path}')
+print(f'[INFO] Detected model type: {detected_type}')
+
+model = create_model(detected_type, in_channels=2, out_channels=1)
 state = torch.load(model_path, map_location=device)
 if 'model_state' in state:
     model.load_state_dict(state['model_state'], strict=False)
@@ -235,7 +465,7 @@ vmax_pred = 6
 
 # --- Scatter Plot Configuration (same as get_metrics.py) ---
 SCATTER_BIN_WIDTH = 0.02
-POINTS_PER_BIN = 20
+POINTS_PER_BIN = 7
 SCATTER_RANGE = (-8.5, 8.5)
 
 # Collect all predictions and GT for scatter plot
@@ -250,6 +480,81 @@ def apply_gamma(img, gamma=0.5):
     img_norm = (img - img_min) / (img_max - img_min)
     img_corrected = np.power(img_norm, gamma)
     return img_corrected
+
+
+def apply_pdf_layout(fig, ax):
+    """Apply consistent PDF layout settings."""
+    fig.set_size_inches(*PDF_FIG_SIZE)
+    fig.subplots_adjust(**PDF_SUBPLOT_ADJUST)
+    ax.set_position(PDF_AX_POS)
+
+
+def set_centered_meter_axis(ax, H, W, m_per_pixel=20):
+    """Set up coordinate axes in meters with center origin."""
+    half_w_m = (W * m_per_pixel) / 2.0
+    half_h_m = (H * m_per_pixel) / 2.0
+
+    tick_vals = np.linspace(-half_w_m, half_w_m, 5)
+    ax.set_xticks(tick_vals)
+    ax.set_yticks(tick_vals)
+    ax.set_xticklabels([f"{int(v)}" for v in tick_vals], fontsize=48, fontweight='bold')
+    ax.set_yticklabels([f"{int(v)}" for v in tick_vals], fontsize=48, fontweight='bold')
+
+    ax.tick_params(
+        axis='both',
+        which='major',
+        direction='out',
+        length=14,
+        width=4,
+        color='black',
+        labelsize=48
+    )
+
+    ax.set_xlabel('X [m]', fontsize=52, fontweight='bold')
+    ax.set_ylabel('Y [m]', fontsize=52, fontweight='bold')
+
+
+def save_section_pdf(img_data, title, out_path, cmap='gray', norm_obj=None, add_colorbar=False,
+                     m_per_pixel=20, extent_m=None, vmin=None, vmax=None, tick_step=None):
+    """Save a single image section as PDF with consistent formatting."""
+    fig, ax = plt.subplots(figsize=PDF_FIG_SIZE, dpi=PDF_DPI)
+
+    if extent_m is None:
+        H, W = img_data.shape[:2]
+        half_w_m = (W * m_per_pixel) / 2.0
+        half_h_m = (H * m_per_pixel) / 2.0
+        extent_m = [-half_w_m, half_w_m, half_h_m, -half_h_m]
+
+    if norm_obj is not None:
+        im = ax.imshow(img_data, cmap=cmap, norm=norm_obj, extent=extent_m, interpolation='nearest')
+    else:
+        im = ax.imshow(img_data, cmap=cmap, extent=extent_m, interpolation='nearest',
+                       vmin=vmin, vmax=vmax)
+    ax.set_aspect('auto')
+    ax.set_title(title, fontsize=56, fontweight='bold', pad=40)
+
+    H, W = img_data.shape[:2]
+    set_centered_meter_axis(ax, H, W, m_per_pixel=m_per_pixel)
+
+    if add_colorbar:
+        # Place colorbar in fixed axes so main image size never changes
+        cbar_h = PDF_AX_POS[3]
+        cbar_y = PDF_AX_POS[1]
+        cbar_x = PDF_AX_POS[0] + PDF_AX_POS[2] + PDF_CBAR_PAD
+        cax = fig.add_axes([cbar_x, cbar_y, PDF_CBAR_WIDTH, cbar_h])
+        cbar = fig.colorbar(im, cax=cax)
+        cbar.ax.tick_params(labelsize=48)
+        cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+        if tick_step is not None and vmin is not None and vmax is not None and tick_step > 0:
+            ticks = np.arange(vmin, vmax + tick_step, tick_step)
+            if vmin < 0 < vmax and 0.0 not in ticks:
+                ticks = np.sort(np.append(ticks, 0.0))
+            cbar.set_ticks(ticks)
+
+    # Apply fixed layout (after colorbar so it doesn't interfere)
+    apply_pdf_layout(fig, ax)
+    plt.savefig(out_path, dpi=PDF_DPI)
+    plt.close(fig)
 
 
 def sample_scatter_points(gt_vals, pred_vals, label_suffix):
@@ -309,7 +614,7 @@ for t in range(sequence.shape[0]):
 
     # Mask logic (as in dataset) - optional
     if USE_MASK:
-        mask = (input_img1 > 0.01).astype(np.uint8)
+        mask = (input_img1 > MASK_THRESHOLD).astype(np.uint8)
     else:
         mask = np.ones_like(input_img1, dtype=np.uint8)
     # Gamma correction for display
@@ -338,6 +643,8 @@ for t in range(sequence.shape[0]):
 
     im3 = None
     im4 = None
+    gt_disp = None
+    diff_disp = None
     if gt_img is not None:
         gt_img = to_2d_gt_map(gt_img, pred_img.shape)
         if USE_MASK:
@@ -384,24 +691,50 @@ for t in range(sequence.shape[0]):
     for ax in axs.flat:
         ax.axis('off')
     plt.tight_layout()
-    fig.canvas.draw()
-    img_w, img_h = fig.canvas.get_width_height()
-    frame_img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8).reshape(img_h, img_w, 3)
     plt.close(fig)
-    # Init video writer with correct size
-    if video_writer is None:
-        # use getattr to avoid static-analysis warning in some environments
-        fourcc_fn = getattr(cv2, 'VideoWriter_fourcc', None)
-        if callable(fourcc_fn):
-            fourcc = fourcc_fn(*'mp4v')
-        else:
-            fourcc = 0
-        video_writer = cv2.VideoWriter(output_video, fourcc, fps, (img_w, img_h))
-    video_writer.write(cv2.cvtColor(frame_img, cv2.COLOR_RGB2BGR))
 
-if video_writer is not None:
-    video_writer.release()
-print(f'Video saved to {output_video}')
+    # Save per-section PDFs for this frame
+    if SAVE_PDF_SECTIONS:
+        frame_dir = os.path.join(PDF_BASE_DIR, f"frame_{t:04d}")
+        os.makedirs(frame_dir, exist_ok=True)
+
+        # Common extent in meters
+        H_img, W_img = pred_img.shape
+        m_per_pixel = 20
+        half_w_m = (W_img * m_per_pixel) / 2.0
+        half_h_m = (H_img * m_per_pixel) / 2.0
+        extent_m = [-half_w_m, half_w_m, half_h_m, -half_h_m]
+
+        # Inputs (satellite images)
+        save_section_pdf(sat1_disp, "Input Satellite A", os.path.join(frame_dir, "sat0.pdf"),
+                         cmap='gray', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m)
+        save_section_pdf(sat2_disp, "Input Satellite B", os.path.join(frame_dir, "sat1.pdf"),
+                         cmap='gray', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m)
+
+        # Mask
+        save_section_pdf(mask_disp, "Cloud Mask", os.path.join(frame_dir, "mask.pdf"),
+                         cmap='gray_r', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m,
+                         vmin=0, vmax=1)
+
+        # Prediction (velocity)
+        save_section_pdf(pred_disp, "Predicted Top Velocity [m/s]", os.path.join(frame_dir, "pred.pdf"),
+                         cmap='jet', add_colorbar=True,
+                         m_per_pixel=m_per_pixel, extent_m=extent_m, vmin=vmin_pred, vmax=vmax_pred,
+                         tick_step=1.0)
+
+        # GT and Difference (if available)
+        if gt_img is not None:
+            save_section_pdf(gt_disp, "Ground Truth Top Velocity [m/s]", os.path.join(frame_dir, "gt.pdf"),
+                             cmap='jet', add_colorbar=True,
+                             m_per_pixel=m_per_pixel, extent_m=extent_m, vmin=vmin_pred, vmax=vmax_pred,
+                             tick_step=1.0)
+
+            save_section_pdf(diff_disp, "Predicted - GT [m/s]", os.path.join(frame_dir, "diff.pdf"),
+                             cmap='RdBu_r', add_colorbar=True,
+                             m_per_pixel=m_per_pixel, extent_m=extent_m, vmin=-3.0, vmax=3.0,
+                             tick_step=1.0)
+
+print(f'[INFO] PDF frames saved to {PDF_BASE_DIR}')
 
 # --- Generate Scatter Plots ---
 if len(scatter_pred_list) > 0 and len(scatter_gt_list) > 0:
@@ -441,7 +774,7 @@ if len(scatter_pred_list) > 0 and len(scatter_gt_list) > 0:
             ax_scatter.grid(True, alpha=0.3, linewidth=1)
             plt.tight_layout()
             
-            scatter_plot_path = os.path.join(output_dir, f'scatter_plot_{movie_level}.png')
+            scatter_plot_path = os.path.join(output_dir, f'scatter_plot_{movie_level}.pdf')
             plt.savefig(scatter_plot_path, dpi=150, bbox_inches='tight')
             print(f'[INFO] Scatter plot saved to {scatter_plot_path}')
             plt.close(fig_scatter)
