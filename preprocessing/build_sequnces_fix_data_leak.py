@@ -16,7 +16,7 @@ root_maps = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_
 output_path = "/home/danino/PycharmProjects/pythonProject/data/3d_688to702.npz"
 
 SEQ_LEN = 12  # Time 0 to 220 (12 frames)
-NUM_SAMPLES = 48 # Samples 000 to 048 (7x7 spatial grid)
+NUM_SAMPLES = 49 # Samples 000 to 048 (7x7 spatial grid)
 
 # --- NEW PARAMETERS ---
 
@@ -37,6 +37,31 @@ NOISE_TARGET = 'view0'  # One of: 'none', 'view0', 'view1', 'both'
 VALID_RANGES = [
     (2000, 19740)
 ]
+
+# --- SPATIAL BLOCK K-FOLD SETTINGS ---
+# The grid is split into 4 rectangular validation blocks.
+# For each fold, one block becomes validation and its 8-connected halo is ignored.
+K_FOLDS = 4
+
+VAL_BLOCKS = [
+    ((0, 1), (0, 2)),  # Top left band
+    ((0, 1), (4, 6)),  # top right band
+    ((2, 3), (0, 6)),  # Middle band
+    ((5, 6), (0, 2)),  # Bottom-left band
+]
+
+STATIC_TEST_CELLS = {
+    (5, 4), (5, 5), (5, 6),
+    (6, 4), (6, 5), (6, 6),
+}
+
+STATIC_IGNORE_CELLS = {
+    (4, c) for c in range(3, 7)
+} | {
+    (5, 3), (6, 3)
+}
+
+GRID_SIZE = 7
 
 # ---------------------------------------------------------
 # 2. HELPER FUNCTIONS - OPTIMIZED
@@ -109,6 +134,65 @@ def load_triplet(folder_name, sample_idx):
         return None
 
 
+def _cell_in_rect(cell, rect):
+    (row_start, row_end), (col_start, col_end) = rect
+    row, col = cell
+    return row_start <= row <= row_end and col_start <= col <= col_end
+
+
+def _expand_halo(cells):
+    halo = set()
+    for row, col in cells:
+        for neighbor_row in range(row - 1, row + 2):
+            for neighbor_col in range(col - 1, col + 2):
+                if 0 <= neighbor_row < GRID_SIZE and 0 <= neighbor_col < GRID_SIZE:
+                    neighbor = (neighbor_row, neighbor_col)
+                    if neighbor not in cells:
+                        halo.add(neighbor)
+    return halo
+
+
+def build_spatial_geometry():
+    """Build validation blocks and their dynamic halo buffers."""
+    block_cells = []
+    block_halos = []
+
+    for block_rect in VAL_BLOCKS:
+        cells = {
+            (row, col)
+            for row in range(block_rect[0][0], block_rect[0][1] + 1)
+            for col in range(block_rect[1][0], block_rect[1][1] + 1)
+        }
+        block_cells.append(cells)
+        block_halos.append(_expand_halo(cells))
+
+    return block_cells, block_halos
+
+
+FOLD_BLOCK_CELLS, FOLD_HALO_CELLS = build_spatial_geometry()
+
+
+def get_spatial_split(s_idx, fold_idx):
+    """Return the split for a sample index in the selected fold."""
+    r = s_idx // 7
+    c = s_idx % 7
+    cell = (r, c)
+
+    if cell in STATIC_TEST_CELLS:
+        return 'test'
+
+    if cell in STATIC_IGNORE_CELLS:
+        return None
+
+    if cell in FOLD_BLOCK_CELLS[fold_idx]:
+        return 'val'
+
+    if cell in FOLD_HALO_CELLS[fold_idx]:
+        return None
+
+    return 'train'
+
+
 # ---------------------------------------------------------
 # 3. MAIN BUILDER
 # ---------------------------------------------------------
@@ -144,15 +228,30 @@ def main():
 
     print(f"Found {len(valid_folders)} valid time folders in specified ranges.")
 
-    # --- GEOGRAPHIC SPLIT LISTS ---
-    train_X, train_Y = [], []
-    val_X, val_Y = [], []
-    test_X, test_Y = [], []
+    if K_FOLDS != len(VAL_BLOCKS):
+        print(f"Error: K_FOLDS={K_FOLDS} must match the number of validation blocks ({len(VAL_BLOCKS)}).")
+        return
+
+    fold_data = []
+    for block_idx, block_rect in enumerate(VAL_BLOCKS):
+        fold_data.append({
+            'val_block': block_rect,
+            'train_X': [],
+            'train_Y': [],
+            'val_X': [],
+            'val_Y': [],
+            'test_X': [],
+            'test_Y': [],
+        })
 
     chunk_indices = list(range(0, len(valid_folders), SEQ_LEN))
     if MAX_CHUNKS is not None:
         chunk_indices = chunk_indices[:MAX_CHUNKS]
         print(f"Limiting execution to first {MAX_CHUNKS} chunks.")
+
+    def append_sequence_to_fold(store, split_name, seq_inputs, seq_targets):
+        store[f'{split_name}_X'].append(np.stack(seq_inputs, axis=0))
+        store[f'{split_name}_Y'].append(np.stack(seq_targets, axis=0))
 
     for i in tqdm(chunk_indices, desc="Time Chunks"):
         batch_folders = valid_folders[i: i + SEQ_LEN]
@@ -160,24 +259,14 @@ def main():
             continue
 
         for s_idx in range(NUM_SAMPLES):
-            # --- 1. SPATIAL SPLIT LOGIC (7x7 GRID) ---
-            # r = row index (0 to 6), c = col index (0 to 6)
-            r = s_idx // 7
-            c = s_idx % 7
+            cell = (s_idx // GRID_SIZE, s_idx % GRID_SIZE)
 
-            target_split = None
-            if r <= 3:
-                target_split = 'train'  # Top 4 rows
-            elif r == 4:
-                continue  # BUFFER ROW: Skip entirely to prevent leakage
-            elif r >= 5:
-                # Bottom 2 rows are split between val and test
-                if c <= 2:
-                    target_split = 'val'  # Left 3 cols
-                elif c == 3:
-                    continue  # BUFFER COL: Skip to prevent leakage between val and test
-                elif c >= 4:
-                    target_split = 'test'  # Right 3 cols
+            if cell in STATIC_TEST_CELLS:
+                target_splits = ['test'] * K_FOLDS
+            elif cell in STATIC_IGNORE_CELLS:
+                continue
+            else:
+                target_splits = [get_spatial_split(s_idx, fold_idx) for fold_idx in range(K_FOLDS)]
 
             seq_inputs = []
             seq_targets = []
@@ -266,45 +355,56 @@ def main():
 
             # --- 3. Append to correct spatial list ---
             if valid_sequence:
-                if target_split == 'train':
-                    train_X.append(np.stack(seq_inputs, axis=0))
-                    train_Y.append(np.stack(seq_targets, axis=0))
-                elif target_split == 'val':
-                    val_X.append(np.stack(seq_inputs, axis=0))
-                    val_Y.append(np.stack(seq_targets, axis=0))
-                elif target_split == 'test':
-                    test_X.append(np.stack(seq_inputs, axis=0))
-                    test_Y.append(np.stack(seq_targets, axis=0))
+                for fold_idx, store in enumerate(fold_data):
+                    target_split = target_splits[fold_idx]
+                    if target_split == 'train':
+                        append_sequence_to_fold(store, 'train', seq_inputs, seq_targets)
+                    elif target_split == 'val':
+                        append_sequence_to_fold(store, 'val', seq_inputs, seq_targets)
+                    elif target_split == 'test':
+                        append_sequence_to_fold(store, 'test', seq_inputs, seq_targets)
 
     # 4. Final Save helper function
-    def save_split_data(X_list, Y_list, split_name):
+    def save_split_data(X_list, Y_list, split_name, output_file):
         if X_list:
             X_all = np.stack(X_list, axis=0)
             Y_all = np.stack(Y_list, axis=0)
 
-            noise_suffix = ""
-            if NOISE_TARGET != 'none' and NOISE_PERCENT > 0:
-                noise_str = f"{NOISE_PERCENT:g}".replace('.', 'p')
-                noise_suffix = f"_noise_{NOISE_TARGET}_{noise_str}pct"
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
-            map_label = 'uvw' if SAVE_UVW else MAP_TYPE
-            final_output_path = output_path.replace(
-                ".npz",
-                f"_{split_name}_{map_label}{noise_suffix}.npz"
-            )
-
-            output_dir = os.path.dirname(final_output_path)
-            os.makedirs(output_dir, exist_ok=True)
-
-            np.savez_compressed(final_output_path, X=X_all, Y=Y_all)
-            print(f"Saved {split_name} -> X: {X_all.shape}, Y: {Y_all.shape} | Path: {final_output_path}")
+            np.savez_compressed(output_file, X=X_all, Y=Y_all)
+            print(f"Saved {split_name} -> X: {X_all.shape}, Y: {Y_all.shape} | Path: {output_file}")
         else:
             print(f"No valid sequences found for {split_name}.")
 
     print("\n--- Saving Datasets ---")
-    save_split_data(train_X, train_Y, 'train')
-    save_split_data(val_X, val_Y, 'val')
-    save_split_data(test_X, test_Y, 'test')
+
+    noise_suffix = ""
+    if NOISE_TARGET != 'none' and NOISE_PERCENT > 0:
+        noise_str = f"{NOISE_PERCENT:g}".replace('.', 'p')
+        noise_suffix = f"_noise_{NOISE_TARGET}_{noise_str}pct"
+
+    map_label = 'uvw' if SAVE_UVW else MAP_TYPE
+    output_root = output_path.replace(".npz", f"_kfold_{map_label}{noise_suffix}")
+    os.makedirs(output_root, exist_ok=True)
+
+    if fold_data and fold_data[0]['test_X']:
+        save_split_data(
+            fold_data[0]['test_X'],
+            fold_data[0]['test_Y'],
+            'test',
+            os.path.join(output_root, f"test_{map_label}.npz"),
+        )
+
+    for fold_idx, store in enumerate(fold_data, start=1):
+        row_start, row_end = store['val_block'][0]
+        col_start, col_end = store['val_block'][1]
+        fold_dir = os.path.join(output_root, f"fold_{fold_idx:02d}_val_r{row_start}-{row_end}_c{col_start}-{col_end}")
+        os.makedirs(fold_dir, exist_ok=True)
+
+        print(f"\n[INFO] Saving fold {fold_idx}/{K_FOLDS} with validation block {store['val_block']} -> {fold_dir}")
+        save_split_data(store['train_X'], store['train_Y'], 'train', os.path.join(fold_dir, f"train_{map_label}.npz"))
+        save_split_data(store['val_X'], store['val_Y'], 'val', os.path.join(fold_dir, f"val_{map_label}.npz"))
 
     elapsed = time.time() - start_time
     print(f"\n[TIMING] Total execution time: {elapsed:.1f} seconds ({elapsed / 60:.1f} minutes)")
