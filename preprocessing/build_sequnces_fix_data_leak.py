@@ -12,8 +12,8 @@ from tqdm import tqdm
 # ---------------------------------------------------------
 
 root_images = "/wdata_visl/danino/dataset_rendered_data_spp8192_g85/render_images/"
-root_maps = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_vel_maps_slice_688_to_702_check/"
-output_path = "/home/danino/PycharmProjects/pythonProject/data/3d_688to702.npz"
+root_maps = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_vel_maps_slice_998_to_1002_check/"
+output_path = "/home/danino/PycharmProjects/pythonProject/data/3d_998to1002.npz"
 
 SEQ_LEN = 12  # Time 0 to 220 (12 frames)
 NUM_SAMPLES = 49 # Samples 000 to 048 (7x7 spatial grid)
@@ -38,6 +38,9 @@ VALID_RANGES = [
     (2000, 19740)
 ]
 
+# VALID_RANGES = [
+#     (2000, 2220)
+# ]
 # --- SPATIAL BLOCK K-FOLD SETTINGS ---
 # The grid is split into 4 rectangular validation blocks.
 # For each fold, one block becomes validation and its 8-connected halo is ignored.

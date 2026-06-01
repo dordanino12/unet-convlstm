@@ -39,13 +39,13 @@ def _to_rgb_frame(fig):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--npz', default='/home/danino/PycharmProjects/pythonProject/data/check_train_uvw.npz')
-    parser.add_argument('--checkpoint', default='models/multih_best_overfit.pt')
-    parser.add_argument('--sequence_idx', type=int, default=0)
+    parser.add_argument('--npz', default='/home/danino/PycharmProjects/pythonProject/data/3d_688to702_test_uvw.npz')
+    parser.add_argument('--checkpoint', default='/home/danino/PycharmProjects/pythonProject/train/models/multih_best.pt')
+    parser.add_argument('--sequence_idx', type=int, default=170)
     parser.add_argument('--height_idx', type=int, default=1, help='Index of the height to visualize (0-based)')
     parser.add_argument('--backbone', default='mit_b1')
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--outdir', default='plots/test_multi_height')
+    parser.add_argument('--outdir', default='/home/danino/PycharmProjects/pythonProject/train/plots/test_multi_height')
     parser.add_argument('--out_video', default=None)
     args = parser.parse_args()
 

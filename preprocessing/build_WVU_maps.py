@@ -52,14 +52,14 @@ if __name__ == "__main__":
     # ================= CONFIGURATION =================
     # Paths
     input_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_beta,U,V,W_fixed/'
-    output_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_vel_maps_slice_688_to_702_check'
+    output_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_vel_maps_slice_998_to_1002_check'
     csv_file_path = '/home/danino/PycharmProjects/pythonProject/data/Dor_2satellites_overpass.csv'
 
     # Rendering Mode
     RENDER_MODE = 'slice'  # Options: 'slice' OR 'first_hit'
 
     # Parameters for Slice Mode
-    SLICE_HEIGHT_M = [688,699,700,701,702]
+    SLICE_HEIGHT_M = [998,999,1000,1001,1002]
     REFERENCE_PLANE_Z = 750.0
 
     # --- CAMERA OVERRIDE SETTINGS ---
