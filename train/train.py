@@ -431,13 +431,13 @@ def main():
                    help='Validation NPZ path (legacy single-split mode)')
     p.add_argument('--test', default='/home/danino/PycharmProjects/pythonProject/data/3d_688to702_test_uvw.npz',
                    help='Test NPZ path')
-    p.add_argument('--kfold-dir', default="/home/danino/PycharmProjects/pythonProject/data/3d_998to1002_kfold_uvw",
+    p.add_argument('--kfold-dir', default="/shared/cycle1_iit_schechner_prj/data_to_train/3d_998to1002_kfold_uvw/",
                    help='K-fold directory path (e.g., /path/to/3d_998to1002_kfold_uvw). If set, overrides --train/--val.')
     p.add_argument('--epochs', type=int, default=1)
     p.add_argument('--batch-size', type=int, default=16)
     p.add_argument('--lr', type=float, default=3e-4)
     p.add_argument('--dropout', type=float, default=0.2)
-    p.add_argument('--out', default='/home/danino/PycharmProjects/pythonProject/train/models')
+    p.add_argument('--out', default='/shared/cycle1_iit_schechner_prj/models/')
     args = p.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -603,7 +603,13 @@ def main():
                 'test_loss': test_loss,
                 'test_mae': test_mae,
                 'test_per_c_mae': test_per_c,
-                'test_per_c_loss': test_loss_per_c
+                'test_per_c_loss': test_loss_per_c,
+                # Save normalization and checkpoint info so we don't reload train splits later
+                'norm_const': float(train_ds.norm_const),
+                'y_scale': train_ds.y_scale.copy(),
+                'y_maxabs': train_ds.y_maxabs.copy(),
+                'target_norm': float(train_ds.target_norm),
+                'checkpoint': os.path.join(args.out, f'multih_best_fold_{fold_idx:02d}.pt')
             })
 
             del train_ds
@@ -628,47 +634,125 @@ def main():
                 label = channel_names[c] if c < len(channel_names) else f"c{c}"
                 print(f"  {label}: Test MAE={v:.4f} | Test Loss={vl:.4f}")
 
-        # Calculate and print mean across folds
+        # Calculate and print mean across folds (previous behaviour kept)
         mean_test_loss = np.mean([r['test_loss'] for r in fold_results])
         mean_test_mae = np.mean([r['test_mae'] for r in fold_results])
         mean_test_per_c_mae = np.mean([r['test_per_c_mae'] for r in fold_results], axis=0)
         mean_test_per_c_loss = np.mean([r['test_per_c_loss'] for r in fold_results], axis=0)
 
         print(f"\n{'─'*70}")
-        print(f"MEAN ACROSS ALL FOLDS: Test Loss: {mean_test_loss:.4f} MAE: {mean_test_mae:.4f}")
+        print(f"MEAN ACROSS ALL FOLDS (mean of fold metrics): Test Loss: {mean_test_loss:.4f} MAE: {mean_test_mae:.4f}")
         for c, (v, vl) in enumerate(zip(mean_test_per_c_mae, mean_test_per_c_loss)):
             label = channel_names[c] if c < len(channel_names) else f"c{c}"
             print(f"  {label}: Test MAE={v:.4f} | Test Loss={vl:.4f}")
         print(f"{'─'*70}\n")
 
-    else:
-        # SINGLE-SPLIT MODE (legacy)
-        train_ds = MultiHeightNPZDataset(args.train)
-        val_ds = MultiHeightNPZDataset(args.val)
+        # -------------------- Ensemble evaluation --------------------
+        # Build ensemble prediction by averaging denormalized per-fold predictions
+        print('\n[ENSEMBLE] Starting ensemble inference across folds...')
 
-        val_ds.norm_const = train_ds.norm_const
-        val_ds.y_scale = train_ds.y_scale.copy()
-        val_ds.y_maxabs = train_ds.y_maxabs.copy()
-        val_ds.target_norm = train_ds.target_norm
+        # Access raw test references (memory-mapped) directly to avoid any normalization applied to test_ds
+        test_X_ref = test_ds.X_ref  # shape (N, T, C, H, W)
+        test_Y_ref = test_ds.Y_ref  # shape (N, T, Nh, C, H, W)
+        N_test = int(test_X_ref.shape[0])
+        T_test = int(test_X_ref.shape[1])
+        C_in = int(test_X_ref.shape[2])
+        H = int(test_X_ref.shape[3])
+        W = int(test_X_ref.shape[4])
+        Nh = int(test_Y_ref.shape[2])
+        C3 = int(test_Y_ref.shape[3])
 
-        test_ds.norm_const = train_ds.norm_const
-        test_ds.y_scale = train_ds.y_scale.copy()
-        test_ds.y_maxabs = train_ds.y_maxabs.copy()
-        test_ds.target_norm = train_ds.target_norm
+        # Preallocate accumulator for denormalized predictions (float64 for numeric stability)
+        ensemble_sum = np.zeros((N_test, T_test, Nh, C3, H, W), dtype=np.float64)
+        models_used = 0
 
-        # Quick sanity check
-        sample_y = np.array(train_ds.Y_ref[:1], dtype=np.float32)
-        sample_y_t = torch.from_numpy(sample_y)
-        sample_y_rt = train_ds.denormalize(train_ds.__getitem__(0)[1].unsqueeze(0))
-        max_rt_err = float(torch.max(torch.abs(sample_y_t - sample_y_rt)).item())
-        print(f"[DATA] Y round-trip max abs error (sample): {max_rt_err:.6e}")
+        # Process each fold's checkpoint and normalization saved earlier
+        for r in fold_results:
+            ckpt_path = r.get('checkpoint')
+            if not os.path.exists(ckpt_path):
+                print(f"[ENSEMBLE] Warning: checkpoint not found for fold {r['fold_idx']}: {ckpt_path} (skipping)")
+                continue
 
-        # Derive bin bounds
-        bin_min = float(np.min(train_ds.Y_ref))
-        bin_max = float(np.max(train_ds.Y_ref))
-        print(f"[DATA] Derived BIN bounds: {bin_min:.4f} to {bin_max:.4f}")
+            # Build model and load weights
+            model = MultiHeightTemporalModel(in_channels=C_in, num_heights=Nh, dropout_p=args.dropout).to(device)
+            try:
+                ck = torch.load(ckpt_path, map_location=device)
+                state = ck.get('model_state', ck)
+                model.load_state_dict(state)
+            except Exception as e:
+                print(f"[ENSEMBLE] Failed to load checkpoint {ckpt_path}: {e} (skipping)")
+                continue
+            model.eval()
 
-        train_and_eval_fold(1, train_ds, val_ds, test_ds, bin_min, bin_max)
+            # Grab normalization constants
+            norm_const = float(r['norm_const'])
+            y_scale = np.array(r['y_scale'], dtype=np.float32)  # shape (Nh, C3)
+
+            # Iterate test set in batches to avoid memory spikes
+            bs = args.batch_size
+            for start in range(0, N_test, bs):
+                end = min(N_test, start + bs)
+                # load raw batch and normalize with fold's train norm
+                X_batch_raw = np.array(test_X_ref[start:end], dtype=np.float32)  # (B, T, C, H, W)
+                X_batch = X_batch_raw / norm_const
+                x_tensor = torch.from_numpy(X_batch).to(device)
+
+                with torch.no_grad():
+                    out = model(x_tensor)
+                    # out: torch tensor shape (B, T, Nh, C3, H, W)
+                    out_np = out.cpu().numpy()
+
+                # Denormalize using saved y_scale: multiply per (Nh,C3)
+                # Broadcast y_scale to (1,1,Nh,C3,1,1)
+                y_scale_b = y_scale.reshape((1, 1, Nh, C3, 1, 1))
+                pred_den = out_np * y_scale_b  # becomes physical units
+
+                # Accumulate
+                ensemble_sum[start:end] += pred_den.astype(np.float64)
+
+            # Cleanup fold model
+            try:
+                del model
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+            models_used += 1
+
+        if models_used == 0:
+            print('[ENSEMBLE] No models available for ensemble — skipping ensemble metrics')
+        else:
+            # Average across folds
+            ensemble_pred_den = (ensemble_sum / float(models_used)).astype(np.float32)
+
+            # Ground truth in physical units (from test npz)
+            gt_all = np.array(test_Y_ref, dtype=np.float32)
+
+            # Compute MAE overall and per-channel/per-height
+            abs_diff = np.abs(ensemble_pred_den - gt_all)
+            total_elements = float(abs_diff.size)
+            overall_mae = float(np.mean(abs_diff))
+
+            per_channel_mae = np.mean(abs_diff, axis=(0, 1, 4, 5))  # shape (Nh, C3) -> wait axis correctness below
+            # Compute per-height x channel MAE (Nh, C3)
+            per_h_c_mae = np.mean(abs_diff, axis=(0, 1, 4, 5)) if abs_diff.ndim == 6 else np.zeros((Nh, C3), dtype=np.float32)
+
+            print('\n[ENSEMBLE RESULT] Ensemble size (models):', models_used)
+            print(f"[ENSEMBLE RESULT] Overall MAE on test (ensemble prediction): {overall_mae:.6f}")
+            print('[ENSEMBLE RESULT] Per-height per-channel MAE (rows=height, cols=channel u,v,w):')
+            # reshape per_h_c_mae to (Nh, C3)
+            try:
+                per_h_c_mae = per_h_c_mae.reshape((Nh, C3))
+                print(per_h_c_mae)
+                print('\nPer-height mean MAE:')
+                print(np.mean(per_h_c_mae, axis=1))
+                print('\nPer-velocity MAE (u, v, w):')
+                print(np.mean(per_h_c_mae, axis=0))
+            except Exception:
+                # Fallback print
+                print(per_h_c_mae)
+
+        print(f"{'─'*70}\n")
 
 
 if __name__ == '__main__':
