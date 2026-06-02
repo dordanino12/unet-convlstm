@@ -1,6 +1,7 @@
 import os
 import pickle
 import time
+import gc
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2  # <--- Added for resizing
@@ -16,7 +17,7 @@ root_maps = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_
 output_path = "/home/danino/PycharmProjects/pythonProject/data/3d_998to1002.npz"
 
 SEQ_LEN = 12  # Time 0 to 220 (12 frames)
-NUM_SAMPLES = 49 # Samples 000 to 048 (7x7 spatial grid)
+NUM_SAMPLES = 49  # Samples 000 to 048 (7x7 spatial grid)
 
 # --- NEW PARAMETERS ---
 
@@ -38,9 +39,6 @@ VALID_RANGES = [
     (2000, 19740)
 ]
 
-# VALID_RANGES = [
-#     (2000, 2220)
-# ]
 # --- SPATIAL BLOCK K-FOLD SETTINGS ---
 # The grid is split into 4 rectangular validation blocks.
 # For each fold, one block becomes validation and its 8-connected halo is ignored.
@@ -59,10 +57,10 @@ STATIC_TEST_CELLS = {
 }
 
 STATIC_IGNORE_CELLS = {
-    (4, c) for c in range(3, 7)
-} | {
-    (5, 3), (6, 3)
-}
+                          (4, c) for c in range(3, 7)
+                      } | {
+                          (5, 3), (6, 3)
+                      }
 
 GRID_SIZE = 7
 
@@ -252,10 +250,6 @@ def main():
         chunk_indices = chunk_indices[:MAX_CHUNKS]
         print(f"Limiting execution to first {MAX_CHUNKS} chunks.")
 
-    def append_sequence_to_fold(store, split_name, seq_inputs, seq_targets):
-        store[f'{split_name}_X'].append(np.stack(seq_inputs, axis=0))
-        store[f'{split_name}_Y'].append(np.stack(seq_targets, axis=0))
-
     for i in tqdm(chunk_indices, desc="Time Chunks"):
         batch_folders = valid_folders[i: i + SEQ_LEN]
         if len(batch_folders) < SEQ_LEN:
@@ -358,25 +352,40 @@ def main():
 
             # --- 3. Append to correct spatial list ---
             if valid_sequence:
+                # STACK ONCE TO SAVE MEMORY - Reduces memory usage by ~75%
+                # By stacking here, all folds share the same array object in memory
+                seq_inputs_stacked = np.stack(seq_inputs, axis=0)
+                seq_targets_stacked = np.stack(seq_targets, axis=0)
+
                 for fold_idx, store in enumerate(fold_data):
                     target_split = target_splits[fold_idx]
                     if target_split == 'train':
-                        append_sequence_to_fold(store, 'train', seq_inputs, seq_targets)
+                        store['train_X'].append(seq_inputs_stacked)
+                        store['train_Y'].append(seq_targets_stacked)
                     elif target_split == 'val':
-                        append_sequence_to_fold(store, 'val', seq_inputs, seq_targets)
+                        store['val_X'].append(seq_inputs_stacked)
+                        store['val_Y'].append(seq_targets_stacked)
                     elif target_split == 'test':
-                        append_sequence_to_fold(store, 'test', seq_inputs, seq_targets)
+                        store['test_X'].append(seq_inputs_stacked)
+                        store['test_Y'].append(seq_targets_stacked)
 
     # 4. Final Save helper function
     def save_split_data(X_list, Y_list, split_name, output_file):
         if X_list:
+            print(f"Stacking {split_name} in memory...")
             X_all = np.stack(X_list, axis=0)
             Y_all = np.stack(Y_list, axis=0)
 
             os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
+            print(f"Writing {split_name} to disk...")
             np.savez_compressed(output_file, X=X_all, Y=Y_all)
             print(f"Saved {split_name} -> X: {X_all.shape}, Y: {Y_all.shape} | Path: {output_file}")
+
+            # Explicitly delete the large arrays to free memory instantly
+            del X_all
+            del Y_all
+            gc.collect()
         else:
             print(f"No valid sequences found for {split_name}.")
 
@@ -391,6 +400,7 @@ def main():
     output_root = output_path.replace(".npz", f"_kfold_{map_label}{noise_suffix}")
     os.makedirs(output_root, exist_ok=True)
 
+    # Save test data once, then clear it entirely from all folds
     if fold_data and fold_data[0]['test_X']:
         save_split_data(
             fold_data[0]['test_X'],
@@ -398,7 +408,13 @@ def main():
             'test',
             os.path.join(output_root, f"test_{map_label}.npz"),
         )
+    # Clear test lists
+    for store in fold_data:
+        store['test_X'].clear()
+        store['test_Y'].clear()
+    gc.collect()
 
+    # Iterate over folds, process, and clear memory sequentially
     for fold_idx, store in enumerate(fold_data, start=1):
         row_start, row_end = store['val_block'][0]
         col_start, col_end = store['val_block'][1]
@@ -406,8 +422,18 @@ def main():
         os.makedirs(fold_dir, exist_ok=True)
 
         print(f"\n[INFO] Saving fold {fold_idx}/{K_FOLDS} with validation block {store['val_block']} -> {fold_dir}")
+
+        # Save and clear train
         save_split_data(store['train_X'], store['train_Y'], 'train', os.path.join(fold_dir, f"train_{map_label}.npz"))
+        store['train_X'].clear()
+        store['train_Y'].clear()
+        gc.collect()
+
+        # Save and clear val
         save_split_data(store['val_X'], store['val_Y'], 'val', os.path.join(fold_dir, f"val_{map_label}.npz"))
+        store['val_X'].clear()
+        store['val_Y'].clear()
+        gc.collect()
 
     elapsed = time.time() - start_time
     print(f"\n[TIMING] Total execution time: {elapsed:.1f} seconds ({elapsed / 60:.1f} minutes)")

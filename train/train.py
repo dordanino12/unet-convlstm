@@ -1,4 +1,3 @@
-
 """
 Train script for multi-height velocity prediction.
 - Expects NPZ files where:
@@ -26,7 +25,7 @@ from resnet18 import PretrainedTemporalUNetMitB1
 
 # ------------------ Dataset ------------------
 class MultiHeightNPZDataset(Dataset):
-    def __init__(self, npz_path, target_norm=0.8):
+    def __init__(self, npz_path, target_norm=0.95):
         # We load without forcing it all into memory at once
         self.data = np.load(npz_path, mmap_mode='r')
         self.X_ref = self.data['X']  # Reference only, not loaded to RAM
@@ -67,7 +66,7 @@ class MultiHeightNPZDataset(Dataset):
                     self.y_scale[h, c] = float(max_abs / self.target_norm)
 
         # Print labeled per-height/per-channel symmetric scales
-        channel_names = ['w', 'u', 'v']  # Adjusted to match your Y structure
+        channel_names = ['u', 'v', 'w']  # Adjusted to match your Y structure
         print(f"[DATA] Y symmetric max-abs scales (Nh*3={self.Nh * self.C3}):")
         for h in range(self.Nh):
             parts = []
@@ -259,7 +258,7 @@ class MultiHeightTemporalModel(nn.Module):
         return y_pred
 
 
-# ------------------ Loss (bin-weighted L1 + small gradient) ------------------
+# ------------------ Loss (bin-weighted L1) ------------------
 def compute_bin_loss(y_pred, y_true, dataset_obj: MultiHeightNPZDataset, bin_min, bin_max):
     """
     y_pred, y_true: Tensors with shape [B, T, Nh, 3, H, W]
@@ -427,12 +426,14 @@ def evaluate(model, loader, device, dataset_obj, bin_min, bin_max):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--train', default='/home/danino/PycharmProjects/pythonProject/data/3d_688to702_train_uvw.npz',
-                   help='Training NPZ path')
+                   help='Training NPZ path (legacy single-split mode)')
     p.add_argument('--val', default='/home/danino/PycharmProjects/pythonProject/data/3d_688to702_val_uvw.npz',
-                   help='Validation NPZ path')
+                   help='Validation NPZ path (legacy single-split mode)')
     p.add_argument('--test', default='/home/danino/PycharmProjects/pythonProject/data/3d_688to702_test_uvw.npz',
                    help='Test NPZ path')
-    p.add_argument('--epochs', type=int, default=10000)
+    p.add_argument('--kfold-dir', default="/home/danino/PycharmProjects/pythonProject/data/3d_998to1002_kfold_uvw",
+                   help='K-fold directory path (e.g., /path/to/3d_998to1002_kfold_uvw). If set, overrides --train/--val.')
+    p.add_argument('--epochs', type=int, default=1)
     p.add_argument('--batch-size', type=int, default=16)
     p.add_argument('--lr', type=float, default=3e-4)
     p.add_argument('--dropout', type=float, default=0.2)
@@ -442,36 +443,19 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 
-    train_ds = MultiHeightNPZDataset(args.train)
-    val_ds = MultiHeightNPZDataset(args.val)
-    test_ds = MultiHeightNPZDataset(args.test)
+    # Check if k-fold mode is enabled
+    use_kfold = args.kfold_dir is not None
+    fold_dirs = []
 
-    val_ds.norm_const = train_ds.norm_const
-    test_ds.norm_const = train_ds.norm_const
+    if use_kfold:
+        print(f"\n[K-FOLD MODE] Using k-fold directory: {args.kfold_dir}")
+        # Find all fold directories
+        fold_dirs = sorted([d for d in os.listdir(args.kfold_dir) if d.startswith('fold_')])
+        print(f"Found {len(fold_dirs)} folds: {fold_dirs}\n")
+    else:
+        print(f"\n[SINGLE-SPLIT MODE] Using single train/val/test split\n")
 
-    # Quick sanity check
-    sample_y = np.array(train_ds.Y_ref[:1], dtype=np.float32)
-    sample_y_t = torch.from_numpy(sample_y)
-    sample_y_rt = train_ds.denormalize(train_ds.__getitem__(0)[1].unsqueeze(0))
-    max_rt_err = float(torch.max(torch.abs(sample_y_t - sample_y_rt)).item())
-    print(f"[DATA] Y round-trip max abs error (sample): {max_rt_err:.6e}")
-
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, pin_memory=True)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, pin_memory=True)
-
-    # Derive bin bounds directly from the mmap slices without fully loading to RAM
-    print("Derived BIN bounds:")
-    # Instead of pulling everything, find min and max directly
-    bin_min = float(np.min(train_ds.Y_ref))
-    bin_max = float(np.max(train_ds.Y_ref))
-    print(f"  {bin_min:.4f} to {bin_max:.4f}")
-
-    model = MultiHeightTemporalModel(
-        in_channels=train_ds.C,
-        num_heights=train_ds.Nh,
-        dropout_p=args.dropout
-    ).to(device)
+    os.makedirs(args.out, exist_ok=True)
 
     def _count_params(module):
         return int(sum(p.numel() for p in module.parameters()))
@@ -479,75 +463,214 @@ def main():
     def _count_trainable_params(module):
         return int(sum(p.numel() for p in module.parameters() if p.requires_grad))
 
-    enc_params = _count_params(getattr(model, 'encoder', nn.Identity())) if hasattr(model, 'encoder') else 0
-    convlstm_params = 0
-    if hasattr(model, 'lstm') and model.lstm is not None:
-        convlstm_params += _count_params(model.lstm)
-    if hasattr(model, 'lstm_skips') and model.lstm_skips is not None:
-        try:
-            for m in model.lstm_skips:
-                convlstm_params += _count_params(m)
-        except Exception:
-            convlstm_params += _count_params(model.lstm_skips)
+    def print_model_params(model):
+        """Print model parameter breakdown"""
+        enc_params = _count_params(getattr(model, 'encoder', nn.Identity())) if hasattr(model, 'encoder') else 0
+        convlstm_params = 0
+        if hasattr(model, 'lstm') and model.lstm is not None:
+            convlstm_params += _count_params(model.lstm)
+        if hasattr(model, 'lstm_skips') and model.lstm_skips is not None:
+            try:
+                for m in model.lstm_skips:
+                    convlstm_params += _count_params(m)
+            except Exception:
+                convlstm_params += _count_params(model.lstm_skips)
 
-    decoder_params = sum(_count_params(m) for m in model.decoders) if hasattr(model, 'decoders') else 0
-    head_params = sum(_count_params(m) for m in model.heads) if hasattr(model, 'heads') else 0
+        decoder_params = sum(_count_params(m) for m in model.decoders) if hasattr(model, 'decoders') else 0
+        head_params = sum(_count_params(m) for m in model.heads) if hasattr(model, 'heads') else 0
 
-    total_params = _count_params(model)
-    trainable_params = _count_trainable_params(model)
+        total_params = _count_params(model)
+        trainable_params = _count_trainable_params(model)
 
-    print('\n[MODEL PARAMS] Breakdown:')
-    print('  Encoder: parameters of the shared encoder (feature extractor)')
-    print(f"    Encoder params: {enc_params:,}")
-    print('  ConvLSTM: parameters of the temporal bottleneck LSTM(s) (main + any skip LSTMs)')
-    print(f"    ConvLSTM params: {convlstm_params:,}")
-    print(f"  Decoders (u/v/w): {decoder_params:,} params")
-    print(f"  Heads (u/v/w, output Nh each): {head_params:,} params")
-    print(f"  Total model params: {total_params:,} ({trainable_params:,} trainable)")
-    print('[MODEL PARAMS] End of breakdown\n')
+        print('\n[MODEL PARAMS] Breakdown:')
+        print('  Encoder: parameters of the shared encoder (feature extractor)')
+        print(f"    Encoder params: {enc_params:,}")
+        print('  ConvLSTM: parameters of the temporal bottleneck LSTM(s) (main + any skip LSTMs)')
+        print(f"    ConvLSTM params: {convlstm_params:,}")
+        print(f"  Decoders (u/v/w): {decoder_params:,} params")
+        print(f"  Heads (u/v/w, output Nh each): {head_params:,} params")
+        print(f"  Total model params: {total_params:,} ({trainable_params:,} trainable)")
+        print('[MODEL PARAMS] End of breakdown\n')
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    scaler = GradScaler('cuda' if device.type == 'cuda' else 'cpu')
+    def train_and_eval_fold(fold_idx, train_ds, val_ds, test_ds, bin_min, bin_max):
+        """Train one fold and return test metrics"""
+        print(f"\n{'='*70}")
+        print(f"FOLD {fold_idx}")
+        print(f"{'='*70}\n")
 
-    os.makedirs(args.out, exist_ok=True)
-    best_val = float('inf')
-    best_saved = False
-    best_path = os.path.join(args.out, 'multih_best.pt')
+        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, pin_memory=True)
+        val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, pin_memory=True)
+        test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, pin_memory=True)
 
-    for epoch in range(1, args.epochs + 1):
-        tr_loss, tr_mae, tr_per_c, tr_loss_per_c = train_one_epoch(
-            model, train_loader, optimizer, device, train_ds, scaler, bin_min, bin_max
-        )
-        val_loss, val_mae, val_per_c, val_loss_per_c = evaluate(
-            model, val_loader, device, val_ds, bin_min, bin_max
-        )
+        model = MultiHeightTemporalModel(
+            in_channels=train_ds.C,
+            num_heights=train_ds.Nh,
+            dropout_p=args.dropout
+        ).to(device)
 
-        print(f"Epoch {epoch}/{args.epochs} | Train Loss: {tr_loss:.4f} MAE: {tr_mae:.4f}")
-        print(f"  Val Loss: {val_loss:.4f} MAE: {val_mae:.4f}")
+        print_model_params(model)
+
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+        scaler = GradScaler('cuda' if device.type == 'cuda' else 'cpu')
+
+        best_val = float('inf')
+        best_saved = False
+        fold_name = f"fold_{fold_idx:02d}" if use_kfold else "single_split"
+        best_path = os.path.join(args.out, f'multih_best_{fold_name}.pt')
         channel_names = ['u', 'v', 'w']
-        for c, (t, v, tl, vl) in enumerate(zip(tr_per_c, val_per_c, tr_loss_per_c, val_loss_per_c)):
+
+        for epoch in range(1, args.epochs + 1):
+            tr_loss, tr_mae, tr_per_c, tr_loss_per_c = train_one_epoch(
+                model, train_loader, optimizer, device, train_ds, scaler, bin_min, bin_max
+            )
+            val_loss, val_mae, val_per_c, val_loss_per_c = evaluate(
+                model, val_loader, device, val_ds, bin_min, bin_max
+            )
+
+            print(f"Epoch {epoch}/{args.epochs} | Train Loss: {tr_loss:.4f} MAE: {tr_mae:.4f}")
+            print(f"  Val Loss: {val_loss:.4f} MAE: {val_mae:.4f}")
+            for c, (t, v, tl, vl) in enumerate(zip(tr_per_c, val_per_c, tr_loss_per_c, val_loss_per_c)):
+                label = channel_names[c] if c < len(channel_names) else f"c{c}"
+                print(f"   {label}: Train MAE={t:.4f} | Val MAE={v:.4f} | Train Loss={tl:.4f} | Val Loss={vl:.4f}")
+
+            if val_loss < best_val:
+                best_val = val_loss
+                torch.save({'model_state': model.state_dict(), 'epoch': epoch, 'val_loss': val_loss}, best_path)
+                best_saved = True
+                print(f"Saved best model (overwritten): {best_path} | Val Loss: {val_loss:.4f}")
+
+        if best_saved:
+            print(f"\nLoading best model from {best_path} for test evaluation")
+            ck = torch.load(best_path, map_location=device)
+            model.load_state_dict(ck['model_state'])
+
+        test_loss, test_mae, test_per_c, test_loss_per_c = evaluate(
+            model, test_loader, device, test_ds, bin_min, bin_max
+        )
+        print(f"\nTest Loss: {test_loss:.4f} MAE: {test_mae:.4f}")
+        for c, (v, vl) in enumerate(zip(test_per_c, test_loss_per_c)):
             label = channel_names[c] if c < len(channel_names) else f"c{c}"
-            print(f"   {label}: Train MAE={t:.4f} | Val MAE={v:.4f} | Train Loss={tl:.4f} | Val Loss={vl:.4f}")
+            print(f"  {label}: Test MAE={v:.4f} | Test Loss={vl:.4f}")
 
-        if val_loss < best_val:
-            best_val = val_loss
-            torch.save({'model_state': model.state_dict(), 'epoch': epoch, 'val_loss': val_loss}, best_path)
-            best_saved = True
-            print(f"Saved best model (overwritten): {best_path} | Val Loss: {val_loss:.4f}")
+        return test_loss, test_mae, test_per_c, test_loss_per_c
 
-    if best_saved:
-        print(f"Loading best model from {best_path} for final test")
-        ck = torch.load(best_path, map_location=device)
-        model.load_state_dict(ck['model_state'])
+    # Load test dataset once (shared across all folds or single split)
+    test_ds = MultiHeightNPZDataset(args.test)
+    channel_names = ['u', 'v', 'w']
 
-    test_loss, test_mae, test_per_c, test_loss_per_c = evaluate(
-        model, test_loader, device, test_ds, bin_min, bin_max
-    )
-    print(f"Test Loss: {test_loss:.4f} MAE: {test_mae:.4f}")
-    for c, (v, vl) in enumerate(zip(test_per_c, test_loss_per_c)):
-        label = channel_names[c] if c < len(channel_names) else f"c{c}"
-        print(f"  {label}: Test MAE={v:.4f} | Test Loss={vl:.4f}")
+    if use_kfold:
+        # K-FOLD MODE
+        fold_results = []
+        for fold_idx, fold_dir in enumerate(fold_dirs, start=1):
+            fold_path = os.path.join(args.kfold_dir, fold_dir)
+            train_path = os.path.join(fold_path, 'train_uvw.npz')
+            val_path = os.path.join(fold_path, 'val_uvw.npz')
+
+            train_ds = MultiHeightNPZDataset(train_path)
+            val_ds = MultiHeightNPZDataset(val_path)
+
+            # Ensure val/test use the same normalization as the training split
+            # - X normalization constant
+            val_ds.norm_const = train_ds.norm_const
+            # - Y normalization (per-height/per-channel symmetric scales)
+            val_ds.y_scale = train_ds.y_scale.copy()
+            val_ds.y_maxabs = train_ds.y_maxabs.copy()
+            val_ds.target_norm = train_ds.target_norm
+
+            test_ds.norm_const = train_ds.norm_const
+            test_ds.y_scale = train_ds.y_scale.copy()
+            test_ds.y_maxabs = train_ds.y_maxabs.copy()
+            test_ds.target_norm = train_ds.target_norm
+
+            # Quick sanity check
+            sample_y = np.array(train_ds.Y_ref[:1], dtype=np.float32)
+            sample_y_t = torch.from_numpy(sample_y)
+            sample_y_rt = train_ds.denormalize(train_ds.__getitem__(0)[1].unsqueeze(0))
+            max_rt_err = float(torch.max(torch.abs(sample_y_t - sample_y_rt)).item())
+            print(f"[DATA] Y round-trip max abs error (sample): {max_rt_err:.6e}")
+
+            # Derive bin bounds from training data
+            bin_min = float(np.min(train_ds.Y_ref))
+            bin_max = float(np.max(train_ds.Y_ref))
+            print(f"[DATA] Derived BIN bounds: {bin_min:.4f} to {bin_max:.4f}")
+
+            # Train and evaluate fold
+            test_loss, test_mae, test_per_c, test_loss_per_c = train_and_eval_fold(
+                fold_idx, train_ds, val_ds, test_ds, bin_min, bin_max
+            )
+            fold_results.append({
+                'fold_idx': fold_idx,
+                'test_loss': test_loss,
+                'test_mae': test_mae,
+                'test_per_c_mae': test_per_c,
+                'test_per_c_loss': test_loss_per_c
+            })
+
+            del train_ds
+            del val_ds
+            import gc
+            gc.collect()
+
+        # Print final k-fold summary
+        print(f"\n\n{'='*70}")
+        print("K-FOLD FINAL SUMMARY")
+        print(f"{'='*70}\n")
+
+        for result in fold_results:
+            fold_idx = result['fold_idx']
+            test_loss = result['test_loss']
+            test_mae = result['test_mae']
+            test_per_c_mae = result['test_per_c_mae']
+            test_per_c_loss = result['test_per_c_loss']
+
+            print(f"Fold {fold_idx}: Test Loss: {test_loss:.4f} MAE: {test_mae:.4f}")
+            for c, (v, vl) in enumerate(zip(test_per_c_mae, test_per_c_loss)):
+                label = channel_names[c] if c < len(channel_names) else f"c{c}"
+                print(f"  {label}: Test MAE={v:.4f} | Test Loss={vl:.4f}")
+
+        # Calculate and print mean across folds
+        mean_test_loss = np.mean([r['test_loss'] for r in fold_results])
+        mean_test_mae = np.mean([r['test_mae'] for r in fold_results])
+        mean_test_per_c_mae = np.mean([r['test_per_c_mae'] for r in fold_results], axis=0)
+        mean_test_per_c_loss = np.mean([r['test_per_c_loss'] for r in fold_results], axis=0)
+
+        print(f"\n{'─'*70}")
+        print(f"MEAN ACROSS ALL FOLDS: Test Loss: {mean_test_loss:.4f} MAE: {mean_test_mae:.4f}")
+        for c, (v, vl) in enumerate(zip(mean_test_per_c_mae, mean_test_per_c_loss)):
+            label = channel_names[c] if c < len(channel_names) else f"c{c}"
+            print(f"  {label}: Test MAE={v:.4f} | Test Loss={vl:.4f}")
+        print(f"{'─'*70}\n")
+
+    else:
+        # SINGLE-SPLIT MODE (legacy)
+        train_ds = MultiHeightNPZDataset(args.train)
+        val_ds = MultiHeightNPZDataset(args.val)
+
+        val_ds.norm_const = train_ds.norm_const
+        val_ds.y_scale = train_ds.y_scale.copy()
+        val_ds.y_maxabs = train_ds.y_maxabs.copy()
+        val_ds.target_norm = train_ds.target_norm
+
+        test_ds.norm_const = train_ds.norm_const
+        test_ds.y_scale = train_ds.y_scale.copy()
+        test_ds.y_maxabs = train_ds.y_maxabs.copy()
+        test_ds.target_norm = train_ds.target_norm
+
+        # Quick sanity check
+        sample_y = np.array(train_ds.Y_ref[:1], dtype=np.float32)
+        sample_y_t = torch.from_numpy(sample_y)
+        sample_y_rt = train_ds.denormalize(train_ds.__getitem__(0)[1].unsqueeze(0))
+        max_rt_err = float(torch.max(torch.abs(sample_y_t - sample_y_rt)).item())
+        print(f"[DATA] Y round-trip max abs error (sample): {max_rt_err:.6e}")
+
+        # Derive bin bounds
+        bin_min = float(np.min(train_ds.Y_ref))
+        bin_max = float(np.max(train_ds.Y_ref))
+        print(f"[DATA] Derived BIN bounds: {bin_min:.4f} to {bin_max:.4f}")
+
+        train_and_eval_fold(1, train_ds, val_ds, test_ds, bin_min, bin_max)
 
 
 if __name__ == '__main__':
     main()
+
