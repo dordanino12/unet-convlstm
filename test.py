@@ -49,18 +49,19 @@ SCATTER_RANGE = (-8.5, 8.5)
 # CHECKPOINT_PATH = "models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
 GT_ENVELOPE_NPZ_PATH = "data/wacv_data/1000m_kfold_w_sensor_noise_both/train_w.npz"
 NPZ_TRAIN_PATH = "data/wacv_data/envelop_kfold_w_sensor_noise_both/test_w.npz"
-#NPZ_TEST_PATH = "data/data_orit_500m_train_w.npz"
-NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1500m_kfold_w_sensor_noise_both/test_w.npz"
+NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/data_orit_1000m_train_w.npz"
+#NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1500m_kfold_w_sensor_noise_both/test_w.npz"
 CHECKPOINT_PATH = "models/wacv/mit_b1_envelop_best_bin_loss.pt"
-KFOLD_MODELS_DIR = "/home/danino/PycharmProjects/pythonProject/models/wacv/1500m"
-KFOLD_DATA_DIR = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1500m_kfold_w_sensor_noise_both/"
+KFOLD_MODELS_DIR = "/home/danino/PycharmProjects/pythonProject/models/wacv/1000m"
+KFOLD_DATA_DIR = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1000m_kfold_w_sensor_noise_both/"
 
+ADD_SENSOR_NOISE = True
 USE_CONV_LSTM = True
 USE_MASK =  False  # True, False, or "slice_mask"
 SHOW_MASK_IMG = True
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
 BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
-SEQUENCE_IDX = 200
+SEQUENCE_IDX = 0
 #USE_TEST_SPLIT = True
 #TEST_SPLIT_SEED = 0
 #TEST_SEQ_RANK = 2
@@ -70,7 +71,6 @@ SAVE_PDF_SECTIONS = True
 PDF_BASE_DIR = os.path.join(os.path.dirname(__file__), 'plots', 'frames_pdf')
 # Option: use only the first satellite image channel (single-sat mode)
 USE_ONE_SATELLITE = False
-ADD_SENSOR_NOISE = False  # <--- NEW: Toggle to add Dark Current + Read Noise + Quantization
 
 # PDF Layout Settings
 PDF_FIG_SIZE = (20, 20)
@@ -518,7 +518,8 @@ def set_centered_meter_axis(ax, height, width, m_per_pixel=20):
 
 
 def save_section_pdf(img_data, title, out_path, cmap='gray', norm_obj=None, add_colorbar=False,
-                     m_per_pixel=20, extent_m=None, vmin=None, vmax=None, tick_step=None):
+                     m_per_pixel=20, extent_m=None, vmin=None, vmax=None, tick_step=None,
+                     show_axis=True, show_labels=True, show_title=True):  # <--- NEW PARAMETERS
     fig, ax = plt.subplots(figsize=(12, 12), dpi=150)
     if extent_m is None:
         H, W = img_data.shape[:2]
@@ -532,10 +533,24 @@ def save_section_pdf(img_data, title, out_path, cmap='gray', norm_obj=None, add_
         im = ax.imshow(img_data, cmap=cmap, extent=extent_m, interpolation='nearest',
                        vmin=vmin, vmax=vmax)
     ax.set_aspect('auto')
-    ax.set_title(title, fontsize=56, fontweight='bold', pad=40)
+
+    if show_title:  # <--- NEW
+        ax.set_title(title, fontsize=56, fontweight='bold', pad=40)
 
     H, W = img_data.shape[:2]
+
+    # We always need to call this to set the limits correctly,
+    # but we will modify the function slightly or hide the results later.
     set_centered_meter_axis(ax, H, W, m_per_pixel=m_per_pixel)
+
+    if not show_axis:  # <--- NEW
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.tick_params(axis='both', which='both', bottom=False, top=False, left=False, right=False)
+
+    if not show_labels:  # <--- NEW
+        ax.set_xlabel('')
+        ax.set_ylabel('')
 
     if add_colorbar:
         # Place colorbar in its own fixed axes so the main image size never changes
@@ -545,7 +560,7 @@ def save_section_pdf(img_data, title, out_path, cmap='gray', norm_obj=None, add_
         cbar_x = PDF_AX_POS[0] + PDF_AX_POS[2] + PDF_CBAR_PAD
         cax = fig.add_axes([cbar_x, cbar_y, PDF_CBAR_WIDTH, cbar_h])
         cbar = fig.colorbar(im, cax=cax)
-        cbar.ax.tick_params(labelsize=48)
+        cbar.ax.tick_params(labelsize=80)
         cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
         if tick_step is not None and vmin is not None and vmax is not None and tick_step > 0:
             ticks = np.arange(vmin, vmax, tick_step)
@@ -553,9 +568,10 @@ def save_section_pdf(img_data, title, out_path, cmap='gray', norm_obj=None, add_
                 ticks = np.sort(np.append(ticks, 0.0))
             cbar.set_ticks(ticks)
 
+
     # Apply fixed layout (do this after colorbar so it doesn't interfere)
     apply_pdf_layout(fig, ax)
-    plt.savefig(out_path, dpi=150)
+    plt.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -763,7 +779,7 @@ for t_len in range(1, T + 1):
         if gt_env_frame is not None:
             env_display = np.ma.masked_where(mask_invalid, gt_env_frame)
         cmap_vel = cmap_custom.copy()
-        cmap_vel.set_bad(color='white')
+        cmap_vel.set_bad(color='black')
     else:
         # No mask or slice_mask: show full velocity images without masking
         gt_display = gt_frame
@@ -952,20 +968,24 @@ for t_len in range(1, T + 1):
 
         # Inputs
         save_section_pdf(sat1, "Input Sat A", os.path.join(frame_dir, "sat0.pdf"),
-                         cmap='gray', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m)
+                         cmap='gray', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m,
+                         show_axis=False, show_labels=False, show_title=False)
         save_section_pdf(sat2, "Input Sat B", os.path.join(frame_dir, "sat1.pdf"),
-                         cmap='gray', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m)
+                         cmap='gray', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m,
+                         show_axis=False, show_labels=False, show_title=False)
 
         # GT and Pred (velocity)
         save_section_pdf(gt_display, "Ground True Velocity [m/s]", os.path.join(frame_dir, "gt.pdf"),
              cmap=cmap_vel, norm_obj=norm, add_colorbar=True,
                  m_per_pixel=m_per_pixel, extent_m=extent_m, vmin=vmin_plot, vmax=vmax_plot,
-                 tick_step=COLORBAR_STEP)
-        save_section_pdf(pred_display, "Predicted Velocity [m/s]", os.path.join(frame_dir, "pred.pdf"),
-             cmap=cmap_vel, norm_obj=norm, add_colorbar=True,
-                 m_per_pixel=m_per_pixel, extent_m=extent_m, vmin=vmin_plot, vmax=vmax_plot,
-                 tick_step=COLORBAR_STEP)
+                 tick_step=COLORBAR_STEP,
+                 show_axis=False, show_labels=False, show_title=False)
 
+        save_section_pdf(pred_display, "Predicted Velocity [m/s]", os.path.join(frame_dir, "pred.pdf"),
+                         cmap=cmap_vel, norm_obj=norm, add_colorbar=True,
+                         m_per_pixel=m_per_pixel, extent_m=extent_m, vmin=vmin_plot, vmax=vmax_plot,
+                         tick_step=COLORBAR_STEP,
+                         show_axis=False, show_labels=False, show_title=False)  # Hides axes, labels, and title
         # Mask
         save_section_pdf(mask_frame, "Cloud Mask", os.path.join(frame_dir, "mask.pdf"),
                          cmap='gray_r', add_colorbar=False, m_per_pixel=m_per_pixel, extent_m=extent_m,
