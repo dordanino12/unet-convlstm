@@ -10,13 +10,17 @@ Supports two architectures:
 from __future__ import annotations
 import os
 import copy
+import sys
+import json
+import argparse
+import subprocess
 import torch
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 import numpy as np
 import torch.fft
 import math
-
+import torch.nn.functional as F
 # --- Local Imports ---
 
 from train.dataset import NPZSequenceDataset
@@ -64,7 +68,7 @@ def exponent_loss(y_pred, y, mask=None, use_mask=True):
         grad_loss = grad_diff.mean()
 
     # Combine losses (0.005 weight for gradients)
-    total_loss = weighted_exp + 0.005 * grad_loss
+    total_loss = weighted_exp #+ 0.005 * grad_loss
     return total_loss
 
 #------------
@@ -86,11 +90,28 @@ def compute_loss(y_pred, y, mask=None, use_mask=True, dataset_obj=None, unmasked
     spatial_mask = None
     mask_for_bins = None
     if use_mask == "slice_mask" and mask is not None:
-        mask_slice_5 = mask[:, 5:6, :, :]
-        mask_broadcasted = mask_slice_5.expand_as(mask)
+        
+        # Select the 5th time step. Using '5' instead of '5:6' drops the time dimension.
+        # Shape goes from [32, 12, 1, 128, 128] -> [32, 1, 128, 128]
+        mask_slice_5 = mask[:, 5, :, :, :] 
+        
+        EXPAND_KERNEL = 5 
+        padding = EXPAND_KERNEL // 2
+        
+        # max_pool2d is now happy because it is receiving a 4D tensor
+        expanded_mask_slice = F.max_pool2d(
+            mask_slice_5, 
+            kernel_size=EXPAND_KERNEL, 
+            stride=1, 
+            padding=padding
+        )
+        
+        # Add the time dimension back: [32, 1, 128, 128] -> [32, 1, 1, 128, 128]
+        expanded_mask_slice = expanded_mask_slice.unsqueeze(1)
+        
+        # Now it safely expands to [32, 12, 1, 128, 128]
+        mask_broadcasted = expanded_mask_slice.expand_as(mask)
         mask_for_bins = mask_broadcasted > 0.5
-    elif use_mask is True and mask is not None:
-        mask_for_bins = mask > 0.5
 
     if mask_for_bins is not None and mask_for_bins.sum() == 0:
         # No masked pixels in this batch: fall back to all pixels for bin stats
@@ -145,8 +166,19 @@ def compute_loss(y_pred, y, mask=None, use_mask=True, dataset_obj=None, unmasked
     if use_mask == "slice_mask" and mask is not None:
         # Extract mask from time step 5 and broadcast
         if mask_broadcasted is None:
-            mask_slice_5 = mask[:, 5:6, :, :]
-            mask_broadcasted = mask_slice_5.expand_as(mask)
+            mask_slice_5 = mask[:, 5, :, :, :] 
+            EXPAND_KERNEL = 5 
+            padding = EXPAND_KERNEL // 2
+            
+            expanded_mask_slice = F.max_pool2d(
+                mask_slice_5, 
+                kernel_size=EXPAND_KERNEL, 
+                stride=1, 
+                padding=padding
+            )
+            expanded_mask_slice = expanded_mask_slice.unsqueeze(1)
+
+            mask_broadcasted = expanded_mask_slice.expand_as(mask)
 
         spatial_mask = torch.ones_like(mask_broadcasted)
         spatial_mask[mask_broadcasted > 0.5] = 1.0
@@ -205,7 +237,7 @@ def compute_loss(y_pred, y, mask=None, use_mask=True, dataset_obj=None, unmasked
         grad_loss = grad_diff.mean()
 
     # Combine losses: L1 + 0.005 * Gradient Loss
-    total_loss = weighted_l1 + 0.005 * grad_loss
+    total_loss = weighted_l1 #+ 0.005 * grad_loss
     return total_loss
 
 # -----------------------------------------------------
@@ -390,19 +422,27 @@ def evaluate(model, loader, device, dataset_obj, use_mask=True, unmasked_weight_
 # Main Execution
 # -----------------------------------------------------
 if __name__ == "__main__":
-    # --- 1. Global Configuration ---
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument(
+        "--kfold-dir",
+        type=str,
+        default=None,
+        help="Optional k-fold root directory (contains fold_* subfolders). If provided, runs each fold.",
+    )
+    cli_args, _ = parser.parse_known_args()
+
+        # --- 1. Global Configuration ---
     BATCH_SIZE_START = 32
     BATCH_SIZE_FINETUNE = 16
 
     # 3-Stage Training Configuration
-    EPOCHS_STAGE1 = 50  # Stage 1: Frozen encoder, no refiner (train decoder/LSTM/head only)
-    EPOCHS_STAGE2 = 50   # Stage 2: Unfreeze encoder, no refiner (train full model except refiner)
-    EPOCHS_STAGE3 = 0   # Stage 3: Freeze full model, train only refiner (fine-tune predictions)
+    EPOCHS_STAGE1 = 20 # Stage 1: Frozen encoder, no refiner (train decoder/LSTM/head only)
+    EPOCHS_STAGE2 = 80   # Stage 2: Unfreeze encoder, no refiner (train full model except refiner)
+    EPOCHS_STAGE3 = 0  # Stage 3: Freeze full model, train only refiner (fine-tune predictions)
     EPOCHS = EPOCHS_STAGE1 + EPOCHS_STAGE2 + EPOCHS_STAGE3
     # --- Loss schedule parameters ---
-    EXPONENT_EPOCHS = 25
-    INTERP_EPOCHS = 40  # Number of epochs to interpolate between exponent and bins loss (increased for smoother transition)
-
+    EXPONENT_EPOCHS = 10
+    INTERP_EPOCHS = 5  # Number of epochs to interpolate between exponent and bins loss (increased for smoother transition)
 
     LR_STAGE1 = 1e-3
     LR_STAGE2 = 3e-4
@@ -414,13 +454,17 @@ if __name__ == "__main__":
     USE_ENVELOP_AS_A_INPUT = False  # Whether to feed GT envelope velocity as an extra input channel
     # Use only one satellite image (first channel) instead of two
     USE_ONE_SATELLITE = False
-    UNMASKED_WEIGHT_FACTOR = 0.9  # Weight multiplier for unmasked areas in slice_mask mode
+    UNMASKED_WEIGHT_FACTOR = 0.5  # Weight multiplier for unmasked areas in slice_mask mode
     TRAIN_AUGMENT = False
-    NPZ_TRAIN_PATH = "data/fix_leak_data/dataset_1000m_w_fix_leak_train_w.npz"
-    NPZ_VAL_PATH = "data/fix_leak_data/dataset_1000m_w_fix_leak_val_w.npz"
-    NPZ_TEST_PATH = "data/fix_leak_data/dataset_1000m_w_fix_leak_test_w.npz"
-    GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_1000m_w.npz"
-    model_name = f"{BACKBONE}_1000m_data_leakag_fix_no_refiner"
+    NPZ_TRAIN_PATH = os.getenv("NPZ_TRAIN_PATH_OVERRIDE", "data/wacv_data/1500m_kfold_w_sensor_noise_both/fold_01_val_r5-6_c0-2/train_w.npz")
+    NPZ_VAL_PATH = os.getenv("NPZ_VAL_PATH_OVERRIDE", "data/wacv_data/1500m_kfold_w_sensor_noise_both/fold_01_val_r5-6_c0-2/val_w.npz")
+    NPZ_TEST_PATH = os.getenv("NPZ_TEST_PATH_OVERRIDE", "data/wacv_data/1500m_kfold_w_sensor_noise_both/test_w.npz")
+    GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/data_orit_envelop_train_w.npz"
+    model_name = f"{BACKBONE}_1500m"
+    TYPE_VEL = "1500m"
+    model_name_suffix = os.getenv("MODEL_NAME_SUFFIX", "")
+    if model_name_suffix:
+        model_name = model_name + model_name_suffix
     if USE_ONE_SATELLITE:
         model_name = model_name + "_one_sat"
     USE_CONV_LSTM = True
@@ -437,6 +481,237 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Running on: {device}")
+
+    def _pick_existing(base_dir, names):
+        for name in names:
+            p = os.path.join(base_dir, name)
+            if os.path.exists(p):
+                return p
+        return None
+
+    # Parent k-fold runner: iterate folds and call this script in single mode per fold.
+    if cli_args.kfold_dir:
+        kfold_root = cli_args.kfold_dir
+        if not os.path.isdir(kfold_root):
+            print(f"ERROR: --kfold-dir is not a directory: {kfold_root}")
+            sys.exit(1)
+
+        fold_dirs = sorted(
+            d for d in os.listdir(kfold_root)
+            if d.startswith("fold_") and os.path.isdir(os.path.join(kfold_root, d))
+        )
+        if not fold_dirs:
+            print(f"ERROR: No fold_* directories found in: {kfold_root}")
+            sys.exit(1)
+
+        test_path = _pick_existing(kfold_root, ["test_w.npz", "test_uvw.npz", "test.npz"])
+        if test_path is None:
+            print(f"ERROR: Could not find shared test file under {kfold_root} (expected test_w.npz or test_uvw.npz)")
+            sys.exit(1)
+
+        print(f"[K-FOLD MODE] Root: {kfold_root}")
+        print(f"[K-FOLD MODE] Found {len(fold_dirs)} folds")
+        print(f"[K-FOLD MODE] Shared test set: {test_path}")
+
+        metrics_dir = os.path.join("models", "wacv", "kfold_metrics")
+        os.makedirs(metrics_dir, exist_ok=True)
+        fold_metrics = []
+
+        for fold_name in fold_dirs:
+            fold_path = os.path.join(kfold_root, fold_name)
+            train_path = _pick_existing(fold_path, ["train_w.npz", "train_uvw.npz", "train.npz"])
+            val_path = _pick_existing(fold_path, ["val_w.npz", "val_uvw.npz", "val.npz"])
+
+            if train_path is None or val_path is None:
+                print(f"[WARN] Skipping {fold_name}: missing train/val npz")
+                continue
+
+            out_metrics = os.path.join(metrics_dir, f"{fold_name}.json")
+            env = os.environ.copy()
+            env["NPZ_TRAIN_PATH_OVERRIDE"] = train_path
+            env["NPZ_VAL_PATH_OVERRIDE"] = val_path
+            env["NPZ_TEST_PATH_OVERRIDE"] = test_path
+            env["MODEL_NAME_SUFFIX"] = f"_{fold_name}"
+            env["METRICS_OUT_PATH"] = out_metrics
+
+            print(f"\n[K-FOLD] Running {fold_name}")
+            print(f"  train={train_path}")
+            print(f"  val={val_path}")
+            proc = subprocess.run([sys.executable, "-u", os.path.abspath(__file__)], env=env)
+            if proc.returncode != 0:
+                print(f"[WARN] Fold {fold_name} failed with code {proc.returncode}")
+                continue
+
+            if os.path.exists(out_metrics):
+                try:
+                    with open(out_metrics, "r", encoding="utf-8") as f:
+                        fold_metrics.append(json.load(f))
+                except Exception as e:
+                    print(f"[WARN] Could not read metrics for {fold_name}: {e}")
+
+        if not fold_metrics:
+            print("ERROR: No successful fold metrics collected.")
+            sys.exit(1)
+
+        print("\n" + "=" * 70)
+        print("K-FOLD SUMMARY")
+        print("=" * 70)
+        for m in fold_metrics:
+            print(
+                f"{m.get('fold_name', 'fold')}: "
+                f"Loss={m.get('test_loss', 0.0):.4f} | "
+                f"MAE={m.get('test_mae', 0.0):.4f} | "
+                f"RMSE={m.get('test_rmse', 0.0):.4f} | "
+                f"ME={m.get('test_me', 0.0):.4f}"
+            )
+
+        mean_loss = float(np.mean([m.get("test_loss", 0.0) for m in fold_metrics]))
+        mean_mae = float(np.mean([m.get("test_mae", 0.0) for m in fold_metrics]))
+        mean_rmse = float(np.mean([m.get("test_rmse", 0.0) for m in fold_metrics]))
+        mean_me = float(np.mean([m.get("test_me", 0.0) for m in fold_metrics]))
+
+        print("-" * 70)
+        print(f"MEAN ACROSS FOLDS: Loss={mean_loss:.4f} | MAE={mean_mae:.4f} | RMSE={mean_rmse:.4f} | ME={mean_me:.4f}")
+
+        # Ensemble evaluation on the shared test set.
+        print("\n[ENSEMBLE] Evaluating mean prediction across fold models...")
+        test_dataset = NPZSequenceDataset(
+            test_path,
+            use_gt_envelope_as_input=USE_ENVELOP_AS_A_INPUT,
+            gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
+            augment=False,
+            use_one_satellite=USE_ONE_SATELLITE,
+        )
+        test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, pin_memory=True)
+
+        ensemble_sum = None
+        models_used = 0
+
+        for m in fold_metrics:
+            fold_name = m.get("fold_name", "")
+            train_path = m.get("npz_train")
+            checkpoint_path = os.path.join("models", "wacv", f"{BACKBONE}_{TYPE_VEL}_{fold_name}_best_bin_loss.pt")
+            if not train_path or not os.path.exists(train_path):
+                print(f"[ENSEMBLE] Skipping {fold_name}: missing train path")
+                continue
+            if not os.path.exists(checkpoint_path):
+                print(f"[ENSEMBLE] Skipping {fold_name}: missing checkpoint {checkpoint_path}")
+                continue
+
+            train_dataset_for_norm = NPZSequenceDataset(
+                train_path,
+                use_gt_envelope_as_input=USE_ENVELOP_AS_A_INPUT,
+                gt_envelope_npz_path=GT_ENVELOPE_NPZ_PATH,
+                augment=False,
+                use_one_satellite=USE_ONE_SATELLITE,
+            )
+
+            fold_model = None
+            if BACKBONE == "resnet18":
+                fold_model = PretrainedTemporalUNet(
+                    out_channels=1,
+                    lstm_layers=1 if USE_CONV_LSTM else 0,
+                    freeze_encoder=True,
+                    in_channels=train_dataset_for_norm.X.shape[2],
+                    use_conv_lstm=USE_CONV_LSTM,
+                    use_refiner=False,
+                    refiner_hidden_channels=REFINER_HIDDEN_CHANNELS
+                ).to(device)
+            elif BACKBONE == "mit_b1":
+                fold_model = PretrainedTemporalUNetMitB1(
+                    out_channels=1,
+                    lstm_layers=1 if USE_CONV_LSTM else 0,
+                    freeze_encoder=True,
+                    in_channels=train_dataset_for_norm.X.shape[2],
+                    use_conv_lstm=USE_CONV_LSTM,
+                    use_refiner=False,
+                    refiner_hidden_channels=REFINER_HIDDEN_CHANNELS
+                ).to(device)
+            elif BACKBONE == "mit_b2":
+                fold_model = PretrainedTemporalUNetMitB2(
+                    out_channels=1,
+                    lstm_layers=1 if USE_CONV_LSTM else 0,
+                    freeze_encoder=True,
+                    in_channels=train_dataset_for_norm.X.shape[2],
+                    use_conv_lstm=USE_CONV_LSTM,
+                    use_refiner=False,
+                    refiner_hidden_channels=REFINER_HIDDEN_CHANNELS
+                ).to(device)
+            elif BACKBONE == "mit_b3":
+                fold_model = PretrainedTemporalUNetMitB3(
+                    out_channels=1,
+                    lstm_layers=1 if USE_CONV_LSTM else 0,
+                    freeze_encoder=True,
+                    in_channels=train_dataset_for_norm.X.shape[2],
+                    use_conv_lstm=USE_CONV_LSTM,
+                    use_refiner=False,
+                    refiner_hidden_channels=REFINER_HIDDEN_CHANNELS
+                ).to(device)
+
+            if fold_model is None:
+                continue
+
+            ckpt = torch.load(checkpoint_path, map_location=device)
+            state = ckpt.get('model_state', ckpt)
+            fold_model.load_state_dict(state, strict=False)
+            fold_model.eval()
+
+            fold_preds = []
+            with torch.no_grad():
+                for x, _, _ in test_loader:
+                    x = x.to(device)
+                    with autocast(device_type=device.type, enabled=(device.type == "cuda")):
+                        out, _ = fold_model(x)
+                    if isinstance(out, list):
+                        out = torch.stack(out, dim=1)
+                    pred_denorm = train_dataset_for_norm.denormalize(out).cpu().numpy().astype(np.float64)
+                    fold_preds.append(pred_denorm)
+
+            if not fold_preds:
+                continue
+
+            fold_pred = np.concatenate(fold_preds, axis=0)
+
+            if ensemble_sum is None:
+                ensemble_sum = fold_pred
+            else:
+                ensemble_sum += fold_pred
+            models_used += 1
+
+        if models_used > 0 and ensemble_sum is not None:
+            ensemble_pred = (ensemble_sum / float(models_used)).astype(np.float32)
+            gt_all = np.asarray(test_dataset.Y, dtype=np.float32)
+
+            diff = ensemble_pred - gt_all
+            # Use the same metric convention as evaluate(): mask-based if USE_MASK is enabled.
+            if USE_MASK:
+                all_mask = []
+                for _, _, mask in test_loader:
+                    all_mask.append(mask.cpu().numpy())
+                mask_np = np.concatenate(all_mask, axis=0)
+                valid = mask_np.astype(bool)
+                if np.any(valid):
+                    valid_diff = diff[valid]
+                    ens_mae = float(np.mean(np.abs(valid_diff)))
+                    ens_rmse = float(np.sqrt(np.mean(valid_diff ** 2)))
+                    ens_me = float(np.mean(valid_diff))
+                else:
+                    ens_mae = ens_rmse = ens_me = 0.0
+            else:
+                ens_mae = float(np.mean(np.abs(diff)))
+                ens_rmse = float(np.sqrt(np.mean(diff ** 2)))
+                ens_me = float(np.mean(diff))
+
+            print(f"[ENSEMBLE RESULT] Models used: {models_used}")
+            print(f"[ENSEMBLE RESULT] Loss is not recomputed for ensemble; metrics are on mean denormalized predictions.")
+            print(f"[ENSEMBLE RESULT] MAE={ens_mae:.4f} | RMSE={ens_rmse:.4f} | ME={ens_me:.4f}")
+        else:
+            print("[ENSEMBLE] No valid fold checkpoints were available for ensemble evaluation.")
+
+        print("=" * 70)
+        sys.exit(0)
+
+
 
     # --- 2. Data Loading ---
     required_npz_paths = [NPZ_TRAIN_PATH, NPZ_VAL_PATH, NPZ_TEST_PATH]
@@ -598,7 +873,7 @@ if __name__ == "__main__":
     best_stage1_val_loss = float('inf')
     best_stage2_val_loss = float('inf')
     best_stage3_val_loss = float('inf')
-    save_dir = "models"
+    save_dir = "models/wacv"
     os.makedirs(save_dir, exist_ok=True)
 
     print(f"\nStarting 3-stage training for {EPOCHS} total epochs...")
@@ -788,3 +1063,25 @@ if __name__ == "__main__":
         model, test_loader, device, train_dataset, use_mask=USE_MASK, unmasked_weight_factor=UNMASKED_WEIGHT_FACTOR, bin_min=bin_min, bin_max=bin_max
     )
     print(f"Test:  Loss={test_loss:.4f} | MAE={test_mae:.4f} | RMSE={test_rmse:.4f} | ME={test_me:.4f}")
+
+    metrics_out_path = os.getenv("METRICS_OUT_PATH", "")
+    if metrics_out_path:
+        try:
+            payload = {
+                "fold_name": os.getenv("MODEL_NAME_SUFFIX", "").lstrip("_") or "single",
+                "npz_train": NPZ_TRAIN_PATH,
+                "npz_val": NPZ_VAL_PATH,
+                "npz_test": NPZ_TEST_PATH,
+                "test_loss": float(test_loss),
+                "test_mae": float(test_mae),
+                "test_rmse": float(test_rmse),
+                "test_me": float(test_me),
+            }
+            out_dir = os.path.dirname(metrics_out_path)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            with open(metrics_out_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            print(f"[INFO] Wrote fold metrics to {metrics_out_path}")
+        except Exception as e:
+            print(f"[WARN] Failed writing metrics file: {e}")

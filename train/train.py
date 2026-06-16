@@ -429,7 +429,7 @@ def main():
                    help='Training NPZ path (legacy single-split mode)')
     p.add_argument('--val', default='/home/danino/PycharmProjects/pythonProject/data/3d_688to702_val_uvw.npz',
                    help='Validation NPZ path (legacy single-split mode)')
-    p.add_argument('--test', default='/home/danino/PycharmProjects/pythonProject/data/3d_688to702_test_uvw.npz',
+    p.add_argument('--test', default='/home/danino/PycharmProjects/pythonProject/data/3d_998to1002_kfold_uvw/test_uvw.npz',
                    help='Test NPZ path')
     p.add_argument('--kfold-dir', default="/shared/cycle1_iit_schechner_prj/data_to_train/3d_998to1002_kfold_uvw/",
                    help='K-fold directory path (e.g., /path/to/3d_998to1002_kfold_uvw). If set, overrides --train/--val.')

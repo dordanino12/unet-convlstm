@@ -32,8 +32,8 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 # Import model classes
-from train.dataset import NPZSequenceDataset
-from train.resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, PretrainedTemporalUNetMitB2, PretrainedTemporalUNetMitB3
+from dataset import NPZSequenceDataset
+from resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, PretrainedTemporalUNetMitB2, PretrainedTemporalUNetMitB3
 
 # -----------------------------
 # Configuration
@@ -49,24 +49,103 @@ USE_ONE_SATELLITE = False
 
 
 # Paths
-NPZ_TRAIN_PATH = "/home/danino/PycharmProjects/pythonProject/data/data_3pre_noise/data_3pre_noise_train_w_noise_view0_3pct.npz"
-NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/data_3pre_noise/data_3pre_noise_test_w_noise_view0_3pct.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/data_fix/mit_b1_1000m_leakag_fix_noised_best_bin_loss.pt"
+NPZ_TRAIN_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1000m_kfold_w_sensor_noise_both/fold_01_val_r0-1_c0-2/train_w.npz"
+NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1500m_kfold_w_sensor_noise_both/test_w.npz"
+CHECKPOINT_PATH = "/models/wacv/1000m/mit_b1_1000m_fold_02_val_r0-1_c4-6_best_bin_loss.pt"
+KFOLD_MODELS_DIR = "/home/danino/PycharmProjects/pythonProject/models/wacv/1500m"
+KFOLD_DATA_DIR = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1500m_kfold_w_sensor_noise_both/"
+#KFOLD_MODELS_DIR = None  # Set to None to disable k-fold ensemble mode
+#KFOLD_DATA_DIR = None  # Set to None to disable k-fold ensemble mode
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 # Option to disable ConvLSTM temporal processing entirely
 USE_CONV_LSTM = True
 ADD_SENSOR_NOISE = False  #
+TEXT_FOR_SCATER = "z = 1500m"
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
 SCATTER_BIN_WIDTH = 0.02  # Width of each velocity bin (e.g., 0.5 m/s)
-POINTS_PER_BIN = 10 #How many points to sample from each bin (The "X" you requested)
+POINTS_PER_BIN = 5 #How many points to sample from each bin (The "X" you requested)
 SCATTER_RANGE = (-8.5, 8.5)  # Range to define bins over
 
 HIST_BINS = 100  # Number of bins for histograms
 min_y = None  # 7.5987958908081055
 max_y = None  # 8.784920692443848
+
+is_kfold_mode = (KFOLD_MODELS_DIR is not None) and (KFOLD_DATA_DIR is not None)
+if is_kfold_mode:
+    output_dir = os.path.join(output_dir, "ensemble_kfold")
+else:
+    output_dir = os.path.join(output_dir, "single_model")
+os.makedirs(output_dir, exist_ok=True)
+
+
+def _pick_existing(base_dir, names):
+    for name in names:
+        path = os.path.join(base_dir, name)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _build_model_from_checkpoint(cfg, checkpoint_state, device, model_in_channels):
+    has_refiner = any('refiner' in key for key in checkpoint_state.keys())
+    refiner_hidden_channels = 32
+    if has_refiner:
+        for key in checkpoint_state.keys():
+            if 'refiner.net.0.weight' in key:
+                refiner_hidden_channels = checkpoint_state[key].shape[0]
+                break
+
+    if BACKBONE == "resnet18":
+        print("[INFO] Loading ResNet18 Model...")
+        model = PretrainedTemporalUNet(
+            out_channels=1,
+            lstm_layers=1 if USE_CONV_LSTM else 0,
+            freeze_encoder=cfg.get('freeze_encoder', True),
+            in_channels=model_in_channels,
+            use_conv_lstm=USE_CONV_LSTM,
+            use_refiner=has_refiner,
+            refiner_hidden_channels=refiner_hidden_channels
+        )
+    elif BACKBONE == "mit_b1":
+        print("[INFO] Loading MiT-B1 Model...")
+        model = PretrainedTemporalUNetMitB1(
+            out_channels=1,
+            lstm_layers=1 if USE_CONV_LSTM else 0,
+            freeze_encoder=cfg.get('freeze_encoder', True),
+            in_channels=model_in_channels,
+            use_conv_lstm=USE_CONV_LSTM,
+            use_refiner=has_refiner,
+            refiner_hidden_channels=refiner_hidden_channels
+        )
+    elif BACKBONE == "mit_b2":
+        print("[INFO] Loading MiT-B2 Model...")
+        model = PretrainedTemporalUNetMitB2(
+            out_channels=1,
+            lstm_layers=1 if USE_CONV_LSTM else 0,
+            freeze_encoder=cfg.get('freeze_encoder', True),
+            in_channels=model_in_channels,
+            use_conv_lstm=USE_CONV_LSTM,
+            use_refiner=has_refiner,
+            refiner_hidden_channels=refiner_hidden_channels
+        )
+    elif BACKBONE == "mit_b3":
+        print("[INFO] Loading MiT-B3 Model...")
+        model = PretrainedTemporalUNetMitB3(
+            out_channels=1,
+            lstm_layers=2 if USE_CONV_LSTM else 0,
+            freeze_encoder=cfg.get('freeze_encoder', True),
+            in_channels=model_in_channels,
+            use_conv_lstm=USE_CONV_LSTM,
+            use_refiner=has_refiner,
+            refiner_hidden_channels=refiner_hidden_channels
+        )
+    else:
+        raise ValueError(f"Unsupported BACKBONE: {BACKBONE}")
+
+    return model, has_refiner, refiner_hidden_channels
 
 # -----------------------------
 # 2. Process Validation Dataset Only
@@ -86,6 +165,7 @@ test_set = NPZSequenceDataset(
     gt_envelope_npz_path=NPZ_TEST_PATH,
     use_one_satellite=USE_ONE_SATELLITE
 )
+
 # Match test normalization to train normalization for consistent metric denormalization.
 test_set.scale = train_dataset_for_norm.scale
 test_set.norm_const = train_dataset_for_norm.norm_const
@@ -94,112 +174,124 @@ _, C, _, _ = test_set[0][0].shape
 # -----------------------------
 # 3. Load Model Logic
 # -----------------------------
-print(f"[INFO] Loading checkpoint: {CHECKPOINT_PATH}")
-checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
+models = []
+fold_train_datasets = []
 
-cfg = checkpoint.get('config', {})
-# Respect checkpoint config for single-sat mode. If the checkpoint doesn't include
-# an explicit flag, infer from checkpoint in_channels==1.
-ckpt_use_one_sat = cfg.get('use_one_satellite', None)
-if ckpt_use_one_sat is None:
-    ckpt_use_one_sat = (cfg.get('in_channels', C) == 1)
-if ckpt_use_one_sat:
-    model_in_channels = 1
+if not is_kfold_mode:
+    print(f"[INFO] Loading checkpoint: {CHECKPOINT_PATH}")
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
+    cfg = checkpoint.get('config', {})
+    ckpt_use_one_sat = cfg.get('use_one_satellite', None)
+    if ckpt_use_one_sat is None:
+        ckpt_use_one_sat = (cfg.get('in_channels', C) == 1)
+    if ckpt_use_one_sat:
+        model_in_channels = 1
+    else:
+        model_in_channels = cfg.get('in_channels', C)
+
+    if ckpt_use_one_sat and not getattr(test_set, 'use_one_satellite', False):
+        print('[INFO] Checkpoint indicates single-satellite input; reloading datasets in single-sat mode')
+        train_dataset_for_norm = NPZSequenceDataset(
+            NPZ_TRAIN_PATH,
+            use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+            gt_envelope_npz_path=NPZ_TRAIN_PATH,
+            use_one_satellite=True
+        )
+        test_set = NPZSequenceDataset(
+            NPZ_TEST_PATH,
+            use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+            gt_envelope_npz_path=NPZ_TEST_PATH,
+            use_one_satellite=True
+        )
+        test_set.scale = train_dataset_for_norm.scale
+        test_set.norm_const = train_dataset_for_norm.norm_const
+        _, C, _, _ = test_set[0][0].shape
+
+    checkpoint_state = checkpoint['model_state']
+    model, has_refiner, refiner_hidden_channels = _build_model_from_checkpoint(cfg, checkpoint_state, DEVICE, model_in_channels)
+    load_result = model.load_state_dict(checkpoint_state, strict=False)
+    if load_result.missing_keys:
+        print(f"[WARN] Missing keys when loading checkpoint: {load_result.missing_keys}")
+    if load_result.unexpected_keys:
+        print(f"[WARN] Unexpected keys when loading checkpoint: {load_result.unexpected_keys}")
+    model.to(DEVICE)
+    model.eval()
+    models.append(model)
+    fold_train_datasets.append(train_dataset_for_norm)
+
+    if has_refiner:
+        print(f"[INFO] ✓ Refiner ENABLED (hidden_channels={refiner_hidden_channels})")
+    else:
+        print(f"[INFO] ✗ Refiner DISABLED (checkpoint has no refiner weights)")
 else:
-    model_in_channels = cfg.get('in_channels', C)
-
-# If checkpoint expects single-satellite but dataset was loaded as two-sat, reload datasets
-if ckpt_use_one_sat and not getattr(test_set, 'use_one_satellite', False):
-    print('[INFO] Checkpoint indicates single-satellite input; reloading datasets in single-sat mode')
-    train_dataset_for_norm = NPZSequenceDataset(
-        NPZ_TRAIN_PATH,
-        use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
-        gt_envelope_npz_path=NPZ_TRAIN_PATH,
-        use_one_satellite=True
+    print(f"[INFO] K-FOLD MODE ENABLED")
+    fold_dirs = sorted(
+        d for d in os.listdir(KFOLD_DATA_DIR)
+        if d.startswith("fold_") and os.path.isdir(os.path.join(KFOLD_DATA_DIR, d))
     )
-    test_set = NPZSequenceDataset(
-        NPZ_TEST_PATH,
-        use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
-        gt_envelope_npz_path=NPZ_TEST_PATH,
-        use_one_satellite=True
-    )
-    test_set.scale = train_dataset_for_norm.scale
-    test_set.norm_const = train_dataset_for_norm.norm_const
-    _, C, _, _ = test_set[0][0].shape
+    print(f"[INFO] Found {len(fold_dirs)} fold directories in {KFOLD_DATA_DIR}")
+    for fold_name in fold_dirs:
+        fold_data_dir = os.path.join(KFOLD_DATA_DIR, fold_name)
+        fold_train_path = _pick_existing(fold_data_dir, ["train_w.npz", "train.npz", "train_uvw.npz"])
+        if fold_train_path is None:
+            print(f"[WARN] Skipping {fold_name}: no train npz found")
+            continue
 
-# Auto-detect if checkpoint has refiner weights
-checkpoint_state = checkpoint['model_state']
-has_refiner = any('refiner' in key for key in checkpoint_state.keys())
+        expected_ckpt_suffix = f"_{fold_name}_best_bin_loss.pt"
+        fold_ckpt_path = None
+        for file_name in sorted(os.listdir(KFOLD_MODELS_DIR)):
+            if file_name.endswith(expected_ckpt_suffix):
+                fold_ckpt_path = os.path.join(KFOLD_MODELS_DIR, file_name)
+                break
+        if fold_ckpt_path is None:
+            print(f"[WARN] Skipping {fold_name}: no checkpoint matching *{expected_ckpt_suffix}")
+            continue
 
-# Auto-detect refiner hidden channels from checkpoint (default 32 if not found)
-refiner_hidden_channels = 32
-if has_refiner:
-    # Try to infer hidden channels from first refiner conv layer
-    for key in checkpoint_state.keys():
-        if 'refiner.net.0.weight' in key:
-            refiner_hidden_channels = checkpoint_state[key].shape[0]
-            break
+        print(f"[INFO] Loading fold model: {fold_ckpt_path}")
+        checkpoint = torch.load(fold_ckpt_path, map_location=DEVICE, weights_only=False)
+        cfg = checkpoint.get('config', {})
+        ckpt_use_one_sat = cfg.get('use_one_satellite', None)
+        if ckpt_use_one_sat is None:
+            ckpt_use_one_sat = (cfg.get('in_channels', C) == 1)
+        if ckpt_use_one_sat:
+            model_in_channels = 1
+        else:
+            model_in_channels = cfg.get('in_channels', C)
 
-if BACKBONE == "resnet18":
-    print("[INFO] Loading ResNet18 Model...")
-    model = PretrainedTemporalUNet(
-        out_channels=1,
-        lstm_layers=1 if USE_CONV_LSTM else 0,
-        freeze_encoder=cfg.get('freeze_encoder', True),
-        in_channels=model_in_channels,
-        use_conv_lstm=USE_CONV_LSTM,
-        use_refiner=has_refiner,
-        refiner_hidden_channels=refiner_hidden_channels
-    )
-elif BACKBONE == "mit_b1":
-    print("[INFO] Loading MiT-B1 Model...")
-    model = PretrainedTemporalUNetMitB1(
-        out_channels=1,
-        lstm_layers=1 if USE_CONV_LSTM else 0,
-        freeze_encoder=cfg.get('freeze_encoder', True),
-        in_channels=model_in_channels,
-        use_conv_lstm=USE_CONV_LSTM,
-        use_refiner=has_refiner,
-        refiner_hidden_channels=refiner_hidden_channels
-    )
-elif BACKBONE == "mit_b2":
-    print("[INFO] Loading MiT-B2 Model...")
-    model = PretrainedTemporalUNetMitB2(
-        out_channels=1,
-        lstm_layers=1 if USE_CONV_LSTM else 0,
-        freeze_encoder=cfg.get('freeze_encoder', True),
-        in_channels=model_in_channels,
-        use_conv_lstm=USE_CONV_LSTM,
-        use_refiner=has_refiner,
-        refiner_hidden_channels=refiner_hidden_channels
-    )
-elif BACKBONE == "mit_b3":
-    print("[INFO] Loading MiT-B3 Model...")
-    model = PretrainedTemporalUNetMitB3(
-        out_channels=1,
-        lstm_layers=2 if USE_CONV_LSTM else 0,
-        freeze_encoder=cfg.get('freeze_encoder', True),
-        in_channels=model_in_channels,
-        use_conv_lstm=USE_CONV_LSTM,
-        use_refiner=has_refiner,
-        refiner_hidden_channels=refiner_hidden_channels
-    )
-else:
-    raise ValueError(f"Unsupported BACKBONE: {BACKBONE}")
+        if ckpt_use_one_sat and not getattr(test_set, 'use_one_satellite', False):
+            test_set = NPZSequenceDataset(
+                NPZ_TEST_PATH,
+                use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+                gt_envelope_npz_path=NPZ_TEST_PATH,
+                use_one_satellite=True
+            )
 
-load_result = model.load_state_dict(checkpoint['model_state'], strict=False)
-if load_result.missing_keys:
-    print(f"[WARN] Missing keys when loading checkpoint: {load_result.missing_keys}")
-if load_result.unexpected_keys:
-    print(f"[WARN] Unexpected keys when loading checkpoint: {load_result.unexpected_keys}")
-model.to(DEVICE)
-model.eval()
+        fold_train_dataset = NPZSequenceDataset(
+            fold_train_path,
+            use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+            gt_envelope_npz_path=fold_train_path,
+            use_one_satellite=ckpt_use_one_sat
+        )
+        if len(fold_train_datasets) == 0:
+            test_set.scale = fold_train_dataset.scale
+            test_set.norm_const = fold_train_dataset.norm_const
 
-# Print refiner status
-if has_refiner:
-    print(f"[INFO] ✓ Refiner ENABLED (hidden_channels={refiner_hidden_channels})")
-else:
-    print(f"[INFO] ✗ Refiner DISABLED (checkpoint has no refiner weights)")
+        checkpoint_state = checkpoint['model_state']
+        model, has_refiner, refiner_hidden_channels = _build_model_from_checkpoint(cfg, checkpoint_state, DEVICE, model_in_channels)
+        load_result = model.load_state_dict(checkpoint_state, strict=False)
+        if load_result.missing_keys:
+            print(f"[WARN] Missing keys when loading {fold_name}: {load_result.missing_keys}")
+        if load_result.unexpected_keys:
+            print(f"[WARN] Unexpected keys when loading {fold_name}: {load_result.unexpected_keys}")
+        model.to(DEVICE)
+        model.eval()
+
+        models.append(model)
+        fold_train_datasets.append(fold_train_dataset)
+
+    print(f"[INFO] Loaded {len(models)} fold models")
+    if len(models) == 0:
+        raise RuntimeError("No fold checkpoints were loaded")
 
 
 # Evaluate on FULL NPZ_TEST_PATH dataset (no random splits)
@@ -270,19 +362,28 @@ for i in tqdm(range(len(eval_ds)), desc="Evaluating"):
     # ---------------------------
 
     x_input = input_seq.unsqueeze(0).to(DEVICE)
+    all_preds = []
     with torch.no_grad():
-        output, _ = model(x_input)
+        for current_model, current_fold_train_dataset in zip(models, fold_train_datasets):
+            output, _ = current_model(x_input)
 
-    if isinstance(output, list):
-        pred_tensor = torch.stack(output, dim=1)
+            if isinstance(output, list):
+                pred_tensor = torch.stack(output, dim=1)
+            else:
+                pred_tensor = output
+
+            pred_vel = pred_tensor.squeeze(0).cpu().numpy()
+            pred_vel_denorm = current_fold_train_dataset.denormalize(pred_vel)
+            all_preds.append(pred_vel_denorm)
+
+    if len(all_preds) == 1:
+        final_pred_vel_denorm = all_preds[0]
     else:
-        pred_tensor = output
+        final_pred_vel_denorm = np.mean(np.stack(all_preds, axis=0), axis=0)
 
-    pred_vel = pred_tensor.squeeze(0).cpu().numpy()
-
-    # Denormalize GT using test dataset stats, predictions using train dataset stats
+    # Denormalize GT using test dataset stats, predictions using fold-specific train datasets
     gt_vel_denorm = test_set.denormalize(gt_vel_seq)
-    pred_vel_denorm = train_dataset_for_norm.denormalize(pred_vel)
+    pred_vel_denorm = final_pred_vel_denorm
 
     # --- Masking Logic ---
     if USE_MASK:
@@ -407,13 +508,17 @@ if len(scatter_gt_list) > 0:
     fig_scatter, ax_scatter = plt.subplots(figsize=(20, 20), dpi=150)
     ax_scatter.scatter(x_scatter, y_scatter, c='tab:blue', s=70, alpha=0.3, rasterized=True)
     ax_scatter.plot([-scatter_range_padded, scatter_range_padded], [-scatter_range_padded, scatter_range_padded], 'k--', lw=4)
-    ax_scatter.set_xlabel("Ground Truth [m/s]", fontsize=56, fontweight='bold')
-    ax_scatter.set_ylabel("Predicted [m/s]", fontsize=56, fontweight='bold')
-    ax_scatter.set_title(f"Balanced Scatter Plot", fontsize=64, fontweight='bold', pad=40)
+    ax_scatter.set_xlabel("Ground Truth [m/s]", fontsize=80, fontweight='bold')
+    ax_scatter.set_ylabel("Inferred [m/s]", fontsize=80, fontweight='bold')
+    #ax_scatter.set_title(f"Balanced Scatter Plot", fontsize=64, fontweight='bold', pad=40)
     ax_scatter.set_xlim(-scatter_range_padded, scatter_range_padded)
     ax_scatter.set_ylim(-scatter_range_padded, scatter_range_padded)
+    ax_scatter.set_xticks([-5, 0, 5])
+    ax_scatter.set_yticks([-5, 0, 5])
     ax_scatter.grid(True, alpha=0.3, linewidth=2)
-    ax_scatter.tick_params(axis='both', which='major', labelsize=52)
+    ax_scatter.tick_params(axis='both', which='major', labelsize=80)
+    ax_scatter.text(0.05, 0.95, TEXT_FOR_SCATER, transform=ax_scatter.transAxes,
+                    fontsize=80, fontweight='bold', va='top', ha='left')
     plt.tight_layout()
     scatter_path = os.path.join(output_dir, "scatter_plot.pdf")
     plt.savefig(scatter_path, dpi=150)

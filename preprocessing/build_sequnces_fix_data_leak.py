@@ -13,8 +13,8 @@ from tqdm import tqdm
 # ---------------------------------------------------------
 
 root_images = "/wdata_visl/danino/dataset_rendered_data_spp8192_g85/render_images/"
-root_maps = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_vel_maps_slice_998_to_1002_check/"
-output_path = "/home/danino/PycharmProjects/pythonProject/data/3d_998to1002.npz"
+root_maps = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_vel_maps_slice_1500m_nadir/"
+output_path = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1500m.npz"
 
 SEQ_LEN = 12  # Time 0 to 220 (12 frames)
 NUM_SAMPLES = 49  # Samples 000 to 048 (7x7 spatial grid)
@@ -22,34 +22,44 @@ NUM_SAMPLES = 49  # Samples 000 to 048 (7x7 spatial grid)
 # --- NEW PARAMETERS ---
 
 MAX_CHUNKS = None  # Set to None to run ALL. Set to 5, 10, etc. for partial runs.
+USE_K_FOLD = True  # If True, creates K_FOLDS with spatial block splits. If False, uses a single fixed validation block.
 
 MAP_TYPE = 'w'  # <--- Select map type here: 'w', 'u', or 'v'
 # If True, ignore MAP_TYPE and save all three components (u,v,w).
 # When SAVE_UVW=True the saved Y per-timestep will have shape (N_heights, 3, H, W)
-SAVE_UVW = True
+SAVE_UVW = False
 
 # --- NEW: Optional deterministic pixel adjustment settings for input views ---
 # Adjustment is applied per pixel as: pixel * (1 + p), where p = NOISE_PERCENT / 100.
 NOISE_PERCENT = 0.0  # Example: 5.0 means add 5% of each pixel value
-NOISE_TARGET = 'view0'  # One of: 'none', 'view0', 'view1', 'both'
+NOISE_TARGET = 'both'  # One of: 'none', 'view0', 'view1', 'both'
+
+# --- NEW: Optional physical sensor noise settings for input views ---
+ADD_SENSOR_NOISE = True  # If True, applies a physical sensor noise model instead of simple relative noise.
 
 # --- NEW: Specify valid folder ranges ---
 
 VALID_RANGES = [
-    (2000, 19740)
+     (2000, 19740)
+    #(5600, 6000)
 ]
 
 # --- SPATIAL BLOCK K-FOLD SETTINGS ---
 # The grid is split into 4 rectangular validation blocks.
 # For each fold, one block becomes validation and its 8-connected halo is ignored.
-K_FOLDS = 4
+if USE_K_FOLD:
+    VAL_BLOCKS = [
+        ((0, 1), (0, 2)),  # Top left band
+        ((0, 1), (4, 6)),  # top right band
+        ((2, 3), (0, 6)),  # Middle band
+        ((5, 6), (0, 2)),  # Bottom-left band
+    ]
+else:
+    VAL_BLOCKS = [
+        ((5, 6), (0, 2)),  # Fixed validation block when not using k-fold
+    ]
 
-VAL_BLOCKS = [
-    ((0, 1), (0, 2)),  # Top left band
-    ((0, 1), (4, 6)),  # top right band
-    ((2, 3), (0, 6)),  # Middle band
-    ((5, 6), (0, 2)),  # Bottom-left band
-]
+K_FOLDS = len(VAL_BLOCKS)
 
 STATIC_TEST_CELLS = {
     (5, 4), (5, 5), (5, 6),
@@ -78,6 +88,34 @@ def apply_relative_noise(image, noise_percent):
 
     p = noise_percent / 100.0
     return (image * (1.0 + p)).astype(np.float32)
+
+
+def apply_sensor_noise(img_array):
+    """
+    Simulates physical sensor noise: Dark Current, Read Noise, and 10-bit Quantization.
+    Uses the same parameters as train/get_metrics.py.
+    """
+    CONVERSION_FACTOR = 178.6304426659069
+    EXPOSURE_TIME_US = 205
+    DARK_CURRENT_RATE = 4.72 * 1e-6  # e-/sec
+    FULL_WELL_CAPACITY = 10600
+    BIT_DEPTH_FACTOR = 1024  # 10-bit
+
+    electrons = img_array * CONVERSION_FACTOR
+
+    dark_noise_mean = DARK_CURRENT_RATE * EXPOSURE_TIME_US
+    dn_noise = np.random.normal(loc=dark_noise_mean, scale=dark_noise_mean ** 0.5, size=electrons.shape)
+    electrons += dn_noise
+
+    read_noise = np.random.normal(loc=0.0, scale=5.29 ** 0.5, size=electrons.shape)
+    electrons += read_noise
+
+    electrons = np.clip(electrons, a_min=0, a_max=FULL_WELL_CAPACITY)
+    dn = electrons * (BIT_DEPTH_FACTOR / FULL_WELL_CAPACITY)
+    electrons_quantized = np.round(dn) * (FULL_WELL_CAPACITY / BIT_DEPTH_FACTOR)
+
+    radiance = electrons_quantized / CONVERSION_FACTOR
+    return radiance.astype(np.float32)
 
 
 def get_files_in_dir(folder):
@@ -216,7 +254,10 @@ def main():
 
     map_label = 'uvw' if SAVE_UVW else f"{MAP_TYPE}_map"
     print(f"[INFO] Selected Map Type: {map_label}")
-    print(f"[INFO] Noise: target={NOISE_TARGET}, max={NOISE_PERCENT}%")
+    if ADD_SENSOR_NOISE:
+        print(f"[INFO] Noise: sensor model enabled, target={NOISE_TARGET}")
+    else:
+        print(f"[INFO] Noise: target={NOISE_TARGET}, max={NOISE_PERCENT}%")
 
     all_folders = sorted([f for f in os.listdir(root_images) if f.isdigit()], key=int)
     valid_folders = []
@@ -292,10 +333,16 @@ def main():
 
                     img0 = cv2.resize(img0, (128, 128), interpolation=cv2.INTER_AREA)
                     img1 = cv2.resize(img1, (128, 128), interpolation=cv2.INTER_AREA)
-                    if NOISE_TARGET in {'view0', 'both'}:
-                        img0 = apply_relative_noise(img0, NOISE_PERCENT)
-                    if NOISE_TARGET in {'view1', 'both'}:
-                        img1 = apply_relative_noise(img1, NOISE_PERCENT)
+                    if ADD_SENSOR_NOISE:
+                        if NOISE_TARGET in {'view0', 'both'}:
+                            img0 = apply_sensor_noise(img0)
+                        if NOISE_TARGET in {'view1', 'both'}:
+                            img1 = apply_sensor_noise(img1)
+                    else:
+                        if NOISE_TARGET in {'view0', 'both'}:
+                            img0 = apply_relative_noise(img0, NOISE_PERCENT)
+                        if NOISE_TARGET in {'view1', 'both'}:
+                            img1 = apply_relative_noise(img1, NOISE_PERCENT)
 
                     img_stack = np.stack([img0, img1], axis=0).astype(np.float32)
 
@@ -376,6 +423,14 @@ def main():
             X_all = np.stack(X_list, axis=0)
             Y_all = np.stack(Y_list, axis=0)
 
+            # For scalar-map targets, remove the height axis only when every sample
+            # in this split is single-height (H==1).
+            # if not SAVE_UVW:
+            #     all_single_height = all((y.ndim == 4 and y.shape[1] == 1) for y in Y_list)
+            #     if all_single_height and Y_all.ndim == 5 and Y_all.shape[2] == 1:
+            #         Y_all = np.squeeze(Y_all, axis=2)
+            #         print(f"[INFO] {split_name}: squeezed single-height axis -> Y shape {Y_all.shape}")
+
             os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
             print(f"Writing {split_name} to disk...")
@@ -392,7 +447,9 @@ def main():
     print("\n--- Saving Datasets ---")
 
     noise_suffix = ""
-    if NOISE_TARGET != 'none' and NOISE_PERCENT > 0:
+    if ADD_SENSOR_NOISE:
+        noise_suffix = f"_sensor_noise_{NOISE_TARGET}"
+    elif NOISE_TARGET != 'none' and NOISE_PERCENT > 0:
         noise_str = f"{NOISE_PERCENT:g}".replace('.', 'p')
         noise_suffix = f"_noise_{NOISE_TARGET}_{noise_str}pct"
 

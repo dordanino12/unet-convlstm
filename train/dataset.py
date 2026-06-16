@@ -54,7 +54,7 @@ class NPZSequenceDataset(Dataset):
         self.max_neg_val = np.abs(np.min(self.Y))  # e.g., |-1.5| = 1.5
 
         # 2. Define Target Norm (0.9 leaves headroom)
-        self.target_norm = 0.8
+        self.target_norm = 0.95
 
         # 3. Calculate Symmetric Scale Factor
         # This ensures BOTH sides map to 0.9 magnitude
