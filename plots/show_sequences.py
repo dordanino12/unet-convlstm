@@ -11,13 +11,13 @@ matplotlib.use('Agg')
 # ---------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------
-NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_500m_slices_w.npz"
+NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top_w_fixed_w.npz"
 OUTPUT_DIR = "/home/danino/PycharmProjects/pythonProject/plots/mask_tuning/"
 NUM_VIDEOS_TO_GENERATE = 1
 FPS = 1
 
 # --- TUNING PARAMETER ---
-MASK_THRESHOLD = 1.1  # The Red line on the graph
+MASK_THRESHOLD = 0.9  # The Red line on the graph
 
 # ---------------------------------------------------------
 # HELPER 1: Satellite Image Normalization

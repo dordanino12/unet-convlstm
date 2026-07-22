@@ -66,7 +66,7 @@ def generate_patches_from_nc(nc_path, output_dir):
                 patch_TABS = nc.variables['TABS'][0, :, y_start:y_end, x_start:x_end]
 
                 # --- Execute Calculation ---
-                _, _, patch_beta = process_cloud_vars(patch_QN, patch_NC, patch_TABS, global_p)
+                patch_LWC, patch_Reff, patch_beta = process_cloud_vars(patch_QN, patch_NC, patch_TABS, global_p)
 
                 # --- Extract Targets ---
                 patch_U = nc.variables['U'][0, :, y_start:y_end, x_start:x_end]
@@ -87,6 +87,9 @@ def generate_patches_from_nc(nc_path, output_dir):
                     'W': np.ma.filled(patch_W, 0.0).astype(np.float32),
                     'beta_ext': np.ma.filled(patch_beta, 0.0).astype(np.float32)
                 }
+                if SAVE_LWC_REFF:
+                    data['LWC'] = np.ma.filled(patch_LWC, 0.0).astype(np.float32)
+                    data['Reff'] = np.ma.filled(patch_Reff, 0.0).astype(np.float32)
 
                 filename = f"sample_{count:03d}.pkl"
                 with open(os.path.join(output_dir, filename), "wb") as f:
@@ -174,11 +177,11 @@ def process_all_nc_files(input_folder, base_output_folder, start_from_folder=Non
 if __name__ == "__main__":
     # Update these paths to your directories
     input_directory = '/wdata_visl/udigal/netCDF_20X20/'
-    output_directory = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)_fixed/'
-    
+    output_directory = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,reff,lwc,U,V,W)_fixed_to_shdom/18000_18220/"
     # Optional: Start from a specific folder (e.g., "0000015860")
     # Optional: End at a specific folder (inclusive, e.g., "0000017000")
-    start_from_folder = "0000012240"  # Change to specific folder number to resume from there
-    end_at_folder = "0000013040"                # Change to specific folder number to stop there (inclusive)
+    start_from_folder = "0000018000"  # Change to specific folder number to resume from there
+    end_at_folder = "0000018220"                # Change to specific folder number to stop there (inclusive)
 
+    SAVE_LWC_REFF = True  # Set to True to save LWC and Reff in output .pkl files
     process_all_nc_files(input_directory, output_directory, start_from_folder, end_at_folder)

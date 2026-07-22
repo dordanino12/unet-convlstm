@@ -1,6 +1,6 @@
 new server : 132.28.58.142
 
-nohup python -u my_script.py > output.log 2>&1 &
+nohup python -u my_script.py > output_train.log 2>&1 &
 
 (The -u flag forces unbuffered output so logs appear immediately)
 
@@ -9,3 +9,11 @@ Run : ps aux | grep python
 Then run : kill "pid number"
 
 setsid pycharm >/dev/null 2>&1 &
+source /home/danino/PycharmProjects/pythonProject/venv/bin/activate
+
+CUDA_LAUNCH_BLOCKING=1 nohup python -u main.py > train_nolstm.log 2>&1 &
+
+ i=0; for d in $(ls -1 | sort); do mv "$d" "$(printf "%010d" $i)"; ((i+=1)); done
+
+to copy data to the server :
+rsync -avP --partial --append-verify --chown=:cycle1_iit_schechner_prj /home/danino/PycharmProjects/pythonProject/data/3d_688to702_test_uvw.npz dor.danino@slurm-login.iucc.ac.il:/shared/cycle1_iit_schechner_prj/data_to_train/

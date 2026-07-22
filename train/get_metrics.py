@@ -32,108 +32,367 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 # Import model classes
-from train.unet import TemporalUNetDualView, NPZSequenceDataset
-from train.resnet18 import PretrainedTemporalUNet
+from dataset import NPZSequenceDataset
+from resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, PretrainedTemporalUNetMitB2, PretrainedTemporalUNetMitB3
 
 # -----------------------------
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK = False
+USE_MASK = False  # Set to True if the dataset provides a mask channel
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
+BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
+# Option: use only the first satellite image channel (single-sat mode)
+USE_ONE_SATELLITE = False
+
+
 
 # Paths
-#NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_W_top.npz"
-#CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_all_speed_skip.pt"
-NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/dataset_trajectory_sequences_samples_1000m_slices_w.npz"
-CHECKPOINT_PATH = "/home/danino/PycharmProjects/pythonProject/models/resnet18_frozen_2lstm_layers_1000m_slice_best_skip.pt"
+NPZ_TRAIN_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/500m_kfold_w_sensor_noise_both/fold_01_val_r0-1_c0-2/train_w.npz"
+NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/500m_kfold_w_sensor_noise_both/test_w.npz"
+CHECKPOINT_PATH = "/models/wacv/1000m/mit_b1_1000m_fold_02_val_r0-1_c4-6_best_bin_loss.pt"
+KFOLD_MODELS_DIR = "/home/danino/PycharmProjects/pythonProject/models/wacv/500m/"
+KFOLD_DATA_DIR = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/500m_kfold_w_sensor_noise_both/"
+#KFOLD_MODELS_DIR = None  # Set to None to disable k-fold ensemble mode
+#KFOLD_DATA_DIR = None  # Set to None to disable k-fold ensemble mode
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
+# Option to disable ConvLSTM temporal processing entirely
+USE_CONV_LSTM = True  # Set to True if the model uses ConvLSTM layers and you want to enable them during evaluation
+APPLY_PHYSICAL_NOISE = False     # (Dark current, Read noise)
+APPLY_PERCENTAGE_NOISE = True    # 
+PERCENTAGE_NOISE_X = 0.03        # 
+TARGET_CAMERA_INDEX = 1
+TEXT_FOR_SCATER = "z = 500m"
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
-SCATTER_BIN_WIDTH = 0.05  # Width of each velocity bin (e.g., 0.5 m/s)
-POINTS_PER_BIN = 1000  # How many points to sample from each bin (The "X" you requested)
-SCATTER_RANGE = (-8.0, 8.0)  # Range to define bins over
+SCATTER_BIN_WIDTH = 0.02  # Width of each velocity bin (e.g., 0.5 m/s)
+POINTS_PER_BIN = 5 #How many points to sample from each bin (The "X" you requested)
+SCATTER_RANGE = (-8.5, 8.5)  # Range to define bins over
 
 HIST_BINS = 100  # Number of bins for histograms
 min_y = None  # 7.5987958908081055
 max_y = None  # 8.784920692443848
 
-# -----------------------------
-# 2. Load Model Logic
-# -----------------------------
-print(f"[INFO] Loading checkpoint: {CHECKPOINT_PATH}")
-checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
-
-cfg = checkpoint.get('config', {})
-model_type = cfg.get('type', 'custom')
-
-print(f"[INFO] Detected Model Type: {model_type}")
-
-if model_type == 'resnet18':
-    model = PretrainedTemporalUNet(
-        out_channels=1,
-        lstm_layers=2,
-        freeze_encoder=cfg.get('freeze_encoder', True)
-    )
+is_kfold_mode = (KFOLD_MODELS_DIR is not None) and (KFOLD_DATA_DIR is not None)
+if is_kfold_mode:
+    output_dir = os.path.join(output_dir, "ensemble_kfold")
 else:
-    model = TemporalUNetDualView(
-        in_channels_per_sat=1,
-        out_channels=1,
-        base_ch=cfg.get('base_ch', 64),
-        lstm_layers=1,
-        use_skip_lstm=cfg.get('use_skip_lstm', True),
-        use_attention=cfg.get('use_attention', False)
+    output_dir = os.path.join(output_dir, "single_model")
+os.makedirs(output_dir, exist_ok=True)
+
+
+def _pick_existing(base_dir, names):
+    for name in names:
+        path = os.path.join(base_dir, name)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _build_model_from_checkpoint(cfg, checkpoint_state, device, model_in_channels):
+    has_refiner = any('refiner' in key for key in checkpoint_state.keys())
+    refiner_hidden_channels = 32
+    if has_refiner:
+        for key in checkpoint_state.keys():
+            if 'refiner.net.0.weight' in key:
+                refiner_hidden_channels = checkpoint_state[key].shape[0]
+                break
+
+    if BACKBONE == "resnet18":
+        print("[INFO] Loading ResNet18 Model...")
+        model = PretrainedTemporalUNet(
+            out_channels=1,
+            lstm_layers=1 if USE_CONV_LSTM else 0,
+            freeze_encoder=cfg.get('freeze_encoder', True),
+            in_channels=model_in_channels,
+            use_conv_lstm=USE_CONV_LSTM,
+            use_refiner=has_refiner,
+            refiner_hidden_channels=refiner_hidden_channels
+        )
+    elif BACKBONE == "mit_b1":
+        print("[INFO] Loading MiT-B1 Model...")
+        model = PretrainedTemporalUNetMitB1(
+            out_channels=1,
+            lstm_layers=1 if USE_CONV_LSTM else 0,
+            freeze_encoder=cfg.get('freeze_encoder', True),
+            in_channels=model_in_channels,
+            use_conv_lstm=USE_CONV_LSTM,
+            use_refiner=has_refiner,
+            refiner_hidden_channels=refiner_hidden_channels
+        )
+    elif BACKBONE == "mit_b2":
+        print("[INFO] Loading MiT-B2 Model...")
+        model = PretrainedTemporalUNetMitB2(
+            out_channels=1,
+            lstm_layers=1 if USE_CONV_LSTM else 0,
+            freeze_encoder=cfg.get('freeze_encoder', True),
+            in_channels=model_in_channels,
+            use_conv_lstm=USE_CONV_LSTM,
+            use_refiner=has_refiner,
+            refiner_hidden_channels=refiner_hidden_channels
+        )
+    elif BACKBONE == "mit_b3":
+        print("[INFO] Loading MiT-B3 Model...")
+        model = PretrainedTemporalUNetMitB3(
+            out_channels=1,
+            lstm_layers=2 if USE_CONV_LSTM else 0,
+            freeze_encoder=cfg.get('freeze_encoder', True),
+            in_channels=model_in_channels,
+            use_conv_lstm=USE_CONV_LSTM,
+            use_refiner=has_refiner,
+            refiner_hidden_channels=refiner_hidden_channels
+        )
+    else:
+        raise ValueError(f"Unsupported BACKBONE: {BACKBONE}")
+
+    return model, has_refiner, refiner_hidden_channels
+
+# -----------------------------
+# 2. Process Validation Dataset Only
+# -----------------------------
+# Load train dataset for normalization/denormalization
+train_dataset_for_norm = NPZSequenceDataset(
+    NPZ_TRAIN_PATH,
+    use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+    gt_envelope_npz_path=NPZ_TRAIN_PATH,
+    use_one_satellite=USE_ONE_SATELLITE
+)
+
+# Load test dataset for evaluation
+test_set = NPZSequenceDataset(
+    NPZ_TEST_PATH,
+    use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+    gt_envelope_npz_path=NPZ_TEST_PATH,
+    use_one_satellite=USE_ONE_SATELLITE
+)
+
+# Match test normalization to train normalization for consistent metric denormalization.
+test_set.scale = train_dataset_for_norm.scale
+test_set.norm_const = train_dataset_for_norm.norm_const
+_, C, _, _ = test_set[0][0].shape
+
+# -----------------------------
+# 3. Load Model Logic
+# -----------------------------
+models = []
+fold_train_datasets = []
+
+if not is_kfold_mode:
+    print(f"[INFO] Loading checkpoint: {CHECKPOINT_PATH}")
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
+    cfg = checkpoint.get('config', {})
+    ckpt_use_one_sat = cfg.get('use_one_satellite', None)
+    if ckpt_use_one_sat is None:
+        ckpt_use_one_sat = (cfg.get('in_channels', C) == 1)
+    if ckpt_use_one_sat:
+        model_in_channels = 1
+    else:
+        model_in_channels = cfg.get('in_channels', C)
+
+    if ckpt_use_one_sat and not getattr(test_set, 'use_one_satellite', False):
+        print('[INFO] Checkpoint indicates single-satellite input; reloading datasets in single-sat mode')
+        train_dataset_for_norm = NPZSequenceDataset(
+            NPZ_TRAIN_PATH,
+            use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+            gt_envelope_npz_path=NPZ_TRAIN_PATH,
+            use_one_satellite=True
+        )
+        test_set = NPZSequenceDataset(
+            NPZ_TEST_PATH,
+            use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+            gt_envelope_npz_path=NPZ_TEST_PATH,
+            use_one_satellite=True
+        )
+        test_set.scale = train_dataset_for_norm.scale
+        test_set.norm_const = train_dataset_for_norm.norm_const
+        _, C, _, _ = test_set[0][0].shape
+
+    checkpoint_state = checkpoint['model_state']
+    model, has_refiner, refiner_hidden_channels = _build_model_from_checkpoint(cfg, checkpoint_state, DEVICE, model_in_channels)
+    load_result = model.load_state_dict(checkpoint_state, strict=False)
+    if load_result.missing_keys:
+        print(f"[WARN] Missing keys when loading checkpoint: {load_result.missing_keys}")
+    if load_result.unexpected_keys:
+        print(f"[WARN] Unexpected keys when loading checkpoint: {load_result.unexpected_keys}")
+    model.to(DEVICE)
+    model.eval()
+    models.append(model)
+    fold_train_datasets.append(train_dataset_for_norm)
+
+    if has_refiner:
+        print(f"[INFO] ✓ Refiner ENABLED (hidden_channels={refiner_hidden_channels})")
+    else:
+        print(f"[INFO] ✗ Refiner DISABLED (checkpoint has no refiner weights)")
+else:
+    print(f"[INFO] K-FOLD MODE ENABLED")
+    fold_dirs = sorted(
+        d for d in os.listdir(KFOLD_DATA_DIR)
+        if d.startswith("fold_") and os.path.isdir(os.path.join(KFOLD_DATA_DIR, d))
     )
+    print(f"[INFO] Found {len(fold_dirs)} fold directories in {KFOLD_DATA_DIR}")
+    for fold_name in fold_dirs:
+        fold_data_dir = os.path.join(KFOLD_DATA_DIR, fold_name)
+        fold_train_path = _pick_existing(fold_data_dir, ["train_w.npz", "train.npz", "train_uvw.npz"])
+        if fold_train_path is None:
+            print(f"[WARN] Skipping {fold_name}: no train npz found")
+            continue
 
-model.load_state_dict(checkpoint['model_state'])
-model.to(DEVICE)
-model.eval()
+        expected_ckpt_suffix = f"_{fold_name}_best_bin_loss.pt"
+        fold_ckpt_path = None
+        for file_name in sorted(os.listdir(KFOLD_MODELS_DIR)):
+            if file_name.endswith(expected_ckpt_suffix):
+                fold_ckpt_path = os.path.join(KFOLD_MODELS_DIR, file_name)
+                break
+        if fold_ckpt_path is None:
+            print(f"[WARN] Skipping {fold_name}: no checkpoint matching *{expected_ckpt_suffix}")
+            continue
 
-# -----------------------------
-# 3. Process Validation Dataset Only
-# -----------------------------
-full_dataset = NPZSequenceDataset(NPZ_PATH, min_y=min_y, max_y=max_y)
+        print(f"[INFO] Loading fold model: {fold_ckpt_path}")
+        checkpoint = torch.load(fold_ckpt_path, map_location=DEVICE, weights_only=False)
+        cfg = checkpoint.get('config', {})
+        ckpt_use_one_sat = cfg.get('use_one_satellite', None)
+        if ckpt_use_one_sat is None:
+            ckpt_use_one_sat = (cfg.get('in_channels', C) == 1)
+        if ckpt_use_one_sat:
+            model_in_channels = 1
+        else:
+            model_in_channels = cfg.get('in_channels', C)
+
+        if ckpt_use_one_sat and not getattr(test_set, 'use_one_satellite', False):
+            test_set = NPZSequenceDataset(
+                NPZ_TEST_PATH,
+                use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+                gt_envelope_npz_path=NPZ_TEST_PATH,
+                use_one_satellite=True
+            )
+
+        fold_train_dataset = NPZSequenceDataset(
+            fold_train_path,
+            use_gt_envelope_as_input=USE_GT_ENVELOPE_INPUT,
+            gt_envelope_npz_path=fold_train_path,
+            use_one_satellite=ckpt_use_one_sat
+        )
+        if len(fold_train_datasets) == 0:
+            test_set.scale = fold_train_dataset.scale
+            test_set.norm_const = fold_train_dataset.norm_const
+
+        checkpoint_state = checkpoint['model_state']
+        model, has_refiner, refiner_hidden_channels = _build_model_from_checkpoint(cfg, checkpoint_state, DEVICE, model_in_channels)
+        load_result = model.load_state_dict(checkpoint_state, strict=False)
+        if load_result.missing_keys:
+            print(f"[WARN] Missing keys when loading {fold_name}: {load_result.missing_keys}")
+        if load_result.unexpected_keys:
+            print(f"[WARN] Unexpected keys when loading {fold_name}: {load_result.unexpected_keys}")
+        model.to(DEVICE)
+        model.eval()
+
+        models.append(model)
+        fold_train_datasets.append(fold_train_dataset)
+
+    print(f"[INFO] Loaded {len(models)} fold models")
+    if len(models) == 0:
+        raise RuntimeError("No fold checkpoints were loaded")
 
 
-# Re-create the split exactly as in training
-n_train = int(0.8 * len(full_dataset))
-n_val = len(full_dataset) - n_train
-
-# Use the same seed generator
-generator = torch.Generator().manual_seed(42)
-train_ds, val_ds = torch.utils.data.random_split(full_dataset, [n_train, n_val], generator=generator)
-
-print(f"[INFO] Dataset loaded. Evaluating on VALIDATION set only ({len(val_ds)} sequences)")
+# Evaluate on FULL NPZ_TEST_PATH dataset (no random splits)
+# This ensures all metrics come from NPZ_TEST_PATH only
+eval_ds = test_set
+print(f"[INFO] Dataset loaded. Evaluating on FULL NPZ_TEST_PATH ({len(eval_ds)} sequences)")
 
 # Lists to store pixel values
 scatter_gt_list = []
 scatter_pred_list = []
 scatter_time_list = []
+def apply_sensor_noise(img_array, camera_idx=None):
+    """
+    Applies physical sensor noise and/or a fixed percentage noise to a specific camera.
+    """
+    result = img_array.copy()
+
+    # 1. הרעש הפיזיקלי המקורי
+    if APPLY_PHYSICAL_NOISE:
+        CONVERSION_FACTOR = 178.6304426659069
+        EXPOSURE_TIME_US = 205
+        DARK_CURRENT_RATE = 4.72 * 1e-6  # e-/sec
+        FULL_WELL_CAPACITY = 10600
+        BIT_DEPTH_FACTOR = 1024  # 10-bit
+
+        electrons = result * CONVERSION_FACTOR
+
+        dark_noise_mean = DARK_CURRENT_RATE * EXPOSURE_TIME_US
+        dn_noise = np.random.normal(loc=dark_noise_mean, scale=dark_noise_mean ** 0.5, size=electrons.shape)
+        electrons += dn_noise
+
+        read_noise = np.random.normal(loc=0.0, scale=5.29 ** 0.5, size=electrons.shape)
+        electrons += read_noise
+
+        electrons = np.clip(electrons, a_min=0, a_max=FULL_WELL_CAPACITY)
+        dn = electrons * (BIT_DEPTH_FACTOR / FULL_WELL_CAPACITY)
+        electrons_quantized = np.round(dn) * (FULL_WELL_CAPACITY / BIT_DEPTH_FACTOR)
+
+        result = electrons_quantized / CONVERSION_FACTOR
+
+    # 2. תוספת של X אחוז מערך הפיקסל רק למצלמה הספציפית
+    if APPLY_PERCENTAGE_NOISE and camera_idx == TARGET_CAMERA_INDEX:
+        # תוספת קבועה של X אחוז:
+        result = result + (result * PERCENTAGE_NOISE_X)
+
+    return result.astype(np.float32)
 
 print("[INFO] Starting evaluation...")
 
-for i in tqdm(range(len(val_ds)), desc="Evaluating"):
+# for i in tqdm(range(len(eval_ds)), desc="Evaluating"):
+#
+#     # Get item from Test Dataset
+#     input_seq, gt_vel_seq, mask_seq = eval_ds[i]
+#
+#     x_input = input_seq.unsqueeze(0).to(DEVICE)
 
-    # Get item from Validation Dataset
-    input_seq, gt_vel_seq, mask_seq = val_ds[i]
+for i in tqdm(range(len(eval_ds)), desc="Evaluating"):
+
+    # 1. Get item from Test Dataset
+    input_seq, gt_vel_seq, mask_seq = eval_ds[i]
+
+    # ---------------------------
+    # --- NEW: Noise Support ---
+    if APPLY_PHYSICAL_NOISE or APPLY_PERCENTAGE_NOISE:
+        # Clone and move to CPU/Numpy to apply sensor effects
+        input_np = input_seq.clone().cpu().numpy()  # Shape: (T, C, H, W)
+        T, C, H, W = input_np.shape
+        for t in range(T):
+            for c in range(C):
+                # נעביר גם את אינדקס המצלמה (c) לפונקציה
+                input_np[t, c] = apply_sensor_noise(input_np[t, c], camera_idx=c)
+        # Convert back to tensor
+        input_seq = torch.from_numpy(input_np)
+    # ---------
 
     x_input = input_seq.unsqueeze(0).to(DEVICE)
-
+    all_preds = []
     with torch.no_grad():
-        output, _ = model(x_input)
+        for current_model, current_fold_train_dataset in zip(models, fold_train_datasets):
+            output, _ = current_model(x_input)
 
-    if isinstance(output, list):
-        pred_tensor = torch.stack(output, dim=1)
+            if isinstance(output, list):
+                pred_tensor = torch.stack(output, dim=1)
+            else:
+                pred_tensor = output
+
+            pred_vel = pred_tensor.squeeze(0).cpu().numpy()
+            pred_vel_denorm = current_fold_train_dataset.denormalize(pred_vel)
+            all_preds.append(pred_vel_denorm)
+
+    if len(all_preds) == 1:
+        final_pred_vel_denorm = all_preds[0]
     else:
-        pred_tensor = output
+        final_pred_vel_denorm = np.mean(np.stack(all_preds, axis=0), axis=0)
 
-    pred_vel = pred_tensor.squeeze(0).cpu().numpy()
-
-    # Denormalize
-    gt_vel_denorm = full_dataset.denormalize(gt_vel_seq)
-    pred_vel_denorm = full_dataset.denormalize(pred_vel)
+    # Denormalize GT using test dataset stats, predictions using fold-specific train datasets
+    gt_vel_denorm = test_set.denormalize(gt_vel_seq)
+    pred_vel_denorm = final_pred_vel_denorm
 
     # --- Masking Logic ---
     if USE_MASK:
@@ -176,6 +435,7 @@ for i in tqdm(range(len(val_ds)), desc="Evaluating"):
 # 4. Global Stats & Plotting
 # -----------------------------
 
+
 if len(scatter_gt_list) > 0:
     # Concatenate all pixels
     all_gt = np.concatenate(scatter_gt_list)
@@ -197,58 +457,51 @@ if len(scatter_gt_list) > 0:
     print(f"Global Error Std:  {global_std_err:.4f} m/s")
     print("=" * 40)
 
+    def sample_scatter_points(gt_vals, pred_vals, label_suffix):
+        # Balanced sampling for scatter plot
+        bins = np.arange(SCATTER_RANGE[0], SCATTER_RANGE[1] + SCATTER_BIN_WIDTH, SCATTER_BIN_WIDTH)
+        bin_indices = np.digitize(gt_vals, bins)
+        selected_indices = []
+        unique_bins = np.unique(bin_indices)
+
+        for b_idx in unique_bins:
+            points_in_bin = np.where(bin_indices == b_idx)[0]
+            n_sample = min(len(points_in_bin), POINTS_PER_BIN)
+            if n_sample > 0:
+                chosen = np.random.choice(points_in_bin, size=n_sample, replace=False)
+                selected_indices.append(chosen)
+
+        if len(selected_indices) > 0:
+            final_indices = np.concatenate(selected_indices)
+            np.random.shuffle(final_indices)
+            x_scatter = gt_vals[final_indices]
+            y_scatter = pred_vals[final_indices]
+            print(f"[INFO] Selected {len(x_scatter)} points total for balanced scatter plot{label_suffix}.")
+        else:
+            print(f"[WARNING] Sampling failed{label_suffix}, using all points.")
+            x_scatter = gt_vals
+            y_scatter = pred_vals
+
+        #scatter_min = min(gt_vals.min(), pred_vals.min())
+        #scatter_max = max(gt_vals.max(), pred_vals.max())
+        scatter_min = gt_vals.min()
+        scatter_max = gt_vals.max()
+        scatter_range_data = max(abs(scatter_min), abs(scatter_max))
+        scatter_range_padded = scatter_range_data * 1.1
+        return x_scatter, y_scatter, scatter_min, scatter_max, scatter_range_padded
+
     # -----------------------------
     # 5. Generate Individual PDF Plots
     # -----------------------------
     print("[INFO] Generating Individual PDF Plots...")
 
-    # --- 1. SCATTER PLOT (Updated: Balanced/Stratified Sampling) ---
-    print(f"[INFO] Performing Balanced Sampling for Scatter Plot...")
+    # --- 1. SCATTER PLOT (All Time Steps) ---
+    print(f"[INFO] Performing Balanced Sampling for Scatter Plot (all time steps)...")
     print(f"       Bins Width: {SCATTER_BIN_WIDTH}, Points per Bin: {POINTS_PER_BIN}")
 
-    # Create bins for the Ground Truth values
-    bins = np.arange(SCATTER_RANGE[0], SCATTER_RANGE[1] + SCATTER_BIN_WIDTH, SCATTER_BIN_WIDTH)
-
-    # Assign each GT value to a bin index
-    # np.digitize returns indices starting from 1
-    bin_indices = np.digitize(all_gt, bins)
-
-    selected_indices = []
-
-    # Iterate over each bin (1 to len(bins))
-    unique_bins = np.unique(bin_indices)
-
-    for b_idx in unique_bins:
-        # Find all data points falling into this bin
-        points_in_bin = np.where(bin_indices == b_idx)[0]
-
-        # Determine how many to sample (min of available points or target limit)
-        n_sample = min(len(points_in_bin), POINTS_PER_BIN)
-
-        if n_sample > 0:
-            # Randomly select indices
-            chosen = np.random.choice(points_in_bin, size=n_sample, replace=False)
-            selected_indices.append(chosen)
-
-    if len(selected_indices) > 0:
-        final_indices = np.concatenate(selected_indices)
-        # Shuffle them so they don't plot in order of bins (visual aesthetics)
-        np.random.shuffle(final_indices)
-
-        x_scatter = all_gt[final_indices]
-        y_scatter = all_pred[final_indices]
-        print(f"[INFO] Selected {len(x_scatter)} points total for balanced scatter plot.")
-    else:
-        # Fallback if something fails
-        print("[WARNING] Sampling failed, using all points.")
-        x_scatter = all_gt
-        y_scatter = all_pred
-
-    # Calculate dynamic ranges based on actual data
-    scatter_min = min(all_gt.min(), all_pred.min())
-    scatter_max = max(all_gt.max(), all_pred.max())
-    scatter_range_data = max(abs(scatter_min), abs(scatter_max))
-    scatter_range_padded = scatter_range_data * 1.1  # Add 10% padding
+    x_scatter, y_scatter, scatter_min, scatter_max, scatter_range_padded = sample_scatter_points(
+        all_gt, all_pred, " (all time steps)"
+    )
 
     hist_range = (scatter_min, scatter_max)
     err_min = all_diff.min()
@@ -262,20 +515,53 @@ if len(scatter_gt_list) > 0:
 
     # Create scatter plot figure
     fig_scatter, ax_scatter = plt.subplots(figsize=(20, 20), dpi=150)
-    ax_scatter.scatter(x_scatter, y_scatter, c='tab:blue', s=8, alpha=0.3)
+    ax_scatter.scatter(x_scatter, y_scatter, c='tab:blue', s=70, alpha=0.3, rasterized=True)
     ax_scatter.plot([-scatter_range_padded, scatter_range_padded], [-scatter_range_padded, scatter_range_padded], 'k--', lw=4)
-    ax_scatter.set_xlabel("Ground Truth [m/s]", fontsize=56, fontweight='bold')
-    ax_scatter.set_ylabel("Predicted [m/s]", fontsize=56, fontweight='bold')
-    ax_scatter.set_title(f"Balanced Scatter Plot", fontsize=64, fontweight='bold', pad=40)
+    ax_scatter.set_xlabel("Ground Truth [m/s]", fontsize=80, fontweight='bold')
+    ax_scatter.set_ylabel("Inferred [m/s]", fontsize=80, fontweight='bold')
+    #ax_scatter.set_title(f"Balanced Scatter Plot", fontsize=64, fontweight='bold', pad=40)
     ax_scatter.set_xlim(-scatter_range_padded, scatter_range_padded)
     ax_scatter.set_ylim(-scatter_range_padded, scatter_range_padded)
+    ax_scatter.set_xticks([-5, 0, 5])
+    ax_scatter.set_yticks([-5, 0, 5])
     ax_scatter.grid(True, alpha=0.3, linewidth=2)
-    ax_scatter.tick_params(axis='both', which='major', labelsize=52)
+    ax_scatter.tick_params(axis='both', which='major', labelsize=80)
+    ax_scatter.text(0.05, 0.95, TEXT_FOR_SCATER, transform=ax_scatter.transAxes,
+                    fontsize=80, fontweight='bold', va='top', ha='left')
     plt.tight_layout()
     scatter_path = os.path.join(output_dir, "scatter_plot.pdf")
     plt.savefig(scatter_path, dpi=150)
     plt.close(fig_scatter)
     print(f"  Saved: scatter_plot.pdf")
+
+    # --- 2. SCATTER PLOT (Time Step 5 Only) ---
+    time5_mask = (all_time == 5)
+    if np.any(time5_mask):
+        scatter_gt_t5 = all_gt[time5_mask]
+        scatter_pred_t5 = all_pred[time5_mask]
+        print(f"[INFO] Performing Balanced Sampling for Scatter Plot (time step 5 only)...")
+
+        x_scatter_t5, y_scatter_t5, scatter_min_t5, scatter_max_t5, scatter_range_padded_t5 = sample_scatter_points(
+            scatter_gt_t5, scatter_pred_t5, " (time step 5)"
+        )
+
+        fig_scatter_t5, ax_scatter_t5 = plt.subplots(figsize=(20, 20), dpi=150)
+        ax_scatter_t5.scatter(x_scatter_t5, y_scatter_t5, c='tab:blue', s=30, alpha=0.3)
+        ax_scatter_t5.plot([-scatter_range_padded_t5, scatter_range_padded_t5], [-scatter_range_padded_t5, scatter_range_padded_t5], 'k--', lw=4)
+        ax_scatter_t5.set_xlabel("Ground Truth [m/s]", fontsize=56, fontweight='bold')
+        ax_scatter_t5.set_ylabel("Predicted [m/s]", fontsize=56, fontweight='bold')
+        ax_scatter_t5.set_title(f"Balanced Scatter Plot (Time Step 5)", fontsize=64, fontweight='bold', pad=40)
+        ax_scatter_t5.set_xlim(-scatter_range_padded_t5, scatter_range_padded_t5)
+        ax_scatter_t5.set_ylim(-scatter_range_padded_t5, scatter_range_padded_t5)
+        ax_scatter_t5.grid(True, alpha=0.3, linewidth=2)
+        ax_scatter_t5.tick_params(axis='both', which='major', labelsize=52)
+        plt.tight_layout()
+        scatter_path_t5 = os.path.join(output_dir, "scatter_plot_t5.pdf")
+        plt.savefig(scatter_path_t5, dpi=150)
+        plt.close(fig_scatter_t5)
+        print(f"  Saved: scatter_plot_t5.pdf")
+    else:
+        print("[WARNING] No samples found for time step 5. Skipping time-step-5 scatter plot.")
 
     # --- 2. MAE OVER TIME ---
     unique_times = np.unique(all_time)
@@ -522,3 +808,4 @@ if len(scatter_gt_list) > 0:
 
 else:
     print("[WARNING] No valid pixels found to plot.")
+

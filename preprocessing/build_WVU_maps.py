@@ -4,7 +4,6 @@ import os
 import pandas as pd
 import ast
 from build_W_map import CloudRayCaster
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 
@@ -52,20 +51,23 @@ if __name__ == "__main__":
 
     # ================= CONFIGURATION =================
     # Paths
-    input_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(beta,U,V,W)//'
-    output_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split(vel_maps_slice_1500m_nadir)/'
+    input_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_beta,U,V,W_fixed/'
+    output_root = '/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_vel_maps_slice_998_to_1002_check'
     csv_file_path = '/home/danino/PycharmProjects/pythonProject/data/Dor_2satellites_overpass.csv'
 
     # Rendering Mode
     RENDER_MODE = 'slice'  # Options: 'slice' OR 'first_hit'
 
     # Parameters for Slice Mode
-    SLICE_HEIGHT_M = 1500.0
+    SLICE_HEIGHT_M = [998,999,1000,1001,1002]
     REFERENCE_PLANE_Z = 750.0
 
     # --- CAMERA OVERRIDE SETTINGS ---
     # Set this to True to ignore the CSV camera position and use the fixed one below
-    USE_FIXED_CAMERA = True
+    if RENDER_MODE == 'slice':
+        USE_FIXED_CAMERA = True
+    else:
+        USE_FIXED_CAMERA = False
 
     # Fixed Camera Position (Meters) - e.g. [0, 0, 600km]
     FIXED_CAMERA_POS = np.array([0.0, 0.0, 600.0 * 1000.0])
@@ -136,6 +138,9 @@ if __name__ == "__main__":
                     else:
                         render_cam_pos = csv_cam_pos
 
+                    # Ensure heights is defined even if not in slice mode to avoid linter warnings
+                    heights = None
+
                     # --- RENDERING LOGIC ---
                     if RENDER_MODE == 'first_hit':
                         u_map, v_map, w_map = caster.render_velocity_maps_first_hit(
@@ -146,20 +151,51 @@ if __name__ == "__main__":
                         mode_suffix = "first_hit"
 
                     elif RENDER_MODE == 'slice':
-                        u_map, v_map, w_map = caster.render_z_slice(
-                            cam_pos=render_cam_pos,
-                            look_at=look_at,
-                            target_z_height=SLICE_HEIGHT_M,
-                            resolution=RES,
-                            reference_plane_z=REFERENCE_PLANE_Z
-                        )
-                        mode_suffix = f"slice_{int(SLICE_HEIGHT_M)}m"
+                        # Support SLICE_HEIGHT_M being either a scalar or an iterable/list of heights.
+                        if isinstance(SLICE_HEIGHT_M, (list, tuple, np.ndarray)):
+                            heights = np.asarray(SLICE_HEIGHT_M, dtype=float)
+                        else:
+                            heights = np.array([float(SLICE_HEIGHT_M)])
+
+                        u_list = []
+                        v_list = []
+                        w_list = []
+                        for h in heights:
+                            u, v, w = caster.render_z_slice(
+                                cam_pos=render_cam_pos,
+                                look_at=look_at,
+                                target_z_height=float(h),
+                                resolution=RES,
+                                reference_plane_z=REFERENCE_PLANE_Z
+                            )
+                            u_list.append(u)
+                            v_list.append(v)
+                            w_list.append(w)
+
+                        # Stack into arrays with shape (N_heights, H, W)
+                        u_map = np.stack(u_list, axis=0)
+                        v_map = np.stack(v_list, axis=0)
+                        w_map = np.stack(w_list, axis=0)
+
+                        if heights.size > 1:
+                            mode_suffix = f"slice_{int(heights[0])}to{int(heights[-1])}m"
+                        else:
+                            mode_suffix = f"slice_{int(heights[0])}m"
 
                     else:
                         raise ValueError(f"Unknown RENDER_MODE: {RENDER_MODE}")
 
                     # Save RAW data
-                    data_packet = {'u_map': u_map, 'v_map': v_map, 'w_map': w_map}
+                    # For slice mode include the heights array; for first_hit keep previous format
+                    if RENDER_MODE == 'slice':
+                        data_packet = {
+                            'slice_heights_m': heights,
+                            'u_map': u_map,
+                            'v_map': v_map,
+                            'w_map': w_map
+                        }
+                    else:
+                        data_packet = {'u_map': u_map, 'v_map': v_map, 'w_map': w_map}
 
                     # Naming: add "_fixedcam" to filename if override is on, to distinguish files?
                     # Or keep same format. I'll append a flag if needed, but for now keeping format as requested.
@@ -170,8 +206,10 @@ if __name__ == "__main__":
                     save_name = f"{base_name}_time_{target_time}_view_{view_idx}_{mode_suffix}.pkl"
                     save_path = os.path.join(current_output_dir, save_name)
 
+                    # Write pickled bytes explicitly to avoid typing warnings
+                    bytes_blob = pickle.dumps(data_packet, protocol=pickle.HIGHEST_PROTOCOL)
                     with open(save_path, 'wb') as f_out:
-                        pickle.dump(data_packet, f_out)
+                        f_out.write(bytes_blob)
 
             except Exception as e:
                 print(f"Failed {pkl_file}: {e}")
