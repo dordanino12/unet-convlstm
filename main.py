@@ -454,20 +454,20 @@ if __name__ == "__main__":
     USE_ENVELOP_AS_A_INPUT = False  # Whether to feed GT envelope velocity as an extra input channel
     # Use only one satellite image (first channel) instead of two
     USE_ONE_SATELLITE = False
-    UNMASKED_WEIGHT_FACTOR = 0.5  # Weight multiplier for unmasked areas in slice_mask mode
+    UNMASKED_WEIGHT_FACTOR = 0.9  # Weight multiplier for unmasked areas in slice_mask mode
     TRAIN_AUGMENT = False
-    NPZ_TRAIN_PATH = os.getenv("NPZ_TRAIN_PATH_OVERRIDE", "data/wacv_data/1500m_kfold_w_sensor_noise_both/fold_01_val_r5-6_c0-2/train_w.npz")
-    NPZ_VAL_PATH = os.getenv("NPZ_VAL_PATH_OVERRIDE", "data/wacv_data/1500m_kfold_w_sensor_noise_both/fold_01_val_r5-6_c0-2/val_w.npz")
-    NPZ_TEST_PATH = os.getenv("NPZ_TEST_PATH_OVERRIDE", "data/wacv_data/1500m_kfold_w_sensor_noise_both/test_w.npz")
+    NPZ_TRAIN_PATH = os.getenv("NPZ_TRAIN_PATH_OVERRIDE", "data/wacv_data/1300m_kfold_w_sensor_noise_both/fold_01_val_r5-6_c0-2/train_w.npz")
+    NPZ_VAL_PATH = os.getenv("NPZ_VAL_PATH_OVERRIDE", "data/wacv_data/1300m_kfold_w_sensor_noise_both/fold_01_val_r5-6_c0-2/val_w.npz")
+    NPZ_TEST_PATH = os.getenv("NPZ_TEST_PATH_OVERRIDE", "data/wacv_data/1300m_kfold_w_sensor_noise_both/test_w.npz")
     GT_ENVELOPE_NPZ_PATH = "/home/danino/PycharmProjects/pythonProject/data/data_orit_envelop_train_w.npz"
-    model_name = f"{BACKBONE}_1500m"
-    TYPE_VEL = "1500m"
+    model_name = f"{BACKBONE}_1300m"
+    TYPE_VEL = "1300m"
     model_name_suffix = os.getenv("MODEL_NAME_SUFFIX", "")
     if model_name_suffix:
         model_name = model_name + model_name_suffix
     if USE_ONE_SATELLITE:
         model_name = model_name + "_one_sat"
-    USE_CONV_LSTM = True
+    USE_CONV_LSTM = True  # Whether to use ConvLSTM layers in the decoder
 
     # Refiner config
     USE_REFINER = False

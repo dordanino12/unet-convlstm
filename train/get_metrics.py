@@ -39,7 +39,7 @@ from resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, Pretra
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK = False
+USE_MASK = False  # Set to True if the dataset provides a mask channel
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
 BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
@@ -49,19 +49,22 @@ USE_ONE_SATELLITE = False
 
 
 # Paths
-NPZ_TRAIN_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1000m_kfold_w_sensor_noise_both/fold_01_val_r0-1_c0-2/train_w.npz"
-NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1500m_kfold_w_sensor_noise_both/test_w.npz"
+NPZ_TRAIN_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/500m_kfold_w_sensor_noise_both/fold_01_val_r0-1_c0-2/train_w.npz"
+NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/500m_kfold_w_sensor_noise_both/test_w.npz"
 CHECKPOINT_PATH = "/models/wacv/1000m/mit_b1_1000m_fold_02_val_r0-1_c4-6_best_bin_loss.pt"
-KFOLD_MODELS_DIR = "/home/danino/PycharmProjects/pythonProject/models/wacv/1500m"
-KFOLD_DATA_DIR = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1500m_kfold_w_sensor_noise_both/"
+KFOLD_MODELS_DIR = "/home/danino/PycharmProjects/pythonProject/models/wacv/500m/"
+KFOLD_DATA_DIR = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/500m_kfold_w_sensor_noise_both/"
 #KFOLD_MODELS_DIR = None  # Set to None to disable k-fold ensemble mode
 #KFOLD_DATA_DIR = None  # Set to None to disable k-fold ensemble mode
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
 output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 # Option to disable ConvLSTM temporal processing entirely
-USE_CONV_LSTM = True
-ADD_SENSOR_NOISE = False  #
-TEXT_FOR_SCATER = "z = 1500m"
+USE_CONV_LSTM = True  # Set to True if the model uses ConvLSTM layers and you want to enable them during evaluation
+APPLY_PHYSICAL_NOISE = False     # (Dark current, Read noise)
+APPLY_PERCENTAGE_NOISE = True    # 
+PERCENTAGE_NOISE_X = 0.03        # 
+TARGET_CAMERA_INDEX = 1
+TEXT_FOR_SCATER = "z = 500m"
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
@@ -303,37 +306,41 @@ print(f"[INFO] Dataset loaded. Evaluating on FULL NPZ_TEST_PATH ({len(eval_ds)} 
 scatter_gt_list = []
 scatter_pred_list = []
 scatter_time_list = []
-def apply_sensor_noise(img_array):
+def apply_sensor_noise(img_array, camera_idx=None):
     """
-    Simulates physical sensor noise: Dark Current, Read Noise, and 10-bit Quantization.
-    Faithful to original parameters.
+    Applies physical sensor noise and/or a fixed percentage noise to a specific camera.
     """
-    CONVERSION_FACTOR = 178.6304426659069
-    EXPOSURE_TIME_US = 205
-    DARK_CURRENT_RATE = 4.72 * 1e-6  # e-/sec
-    FULL_WELL_CAPACITY = 10600
-    BIT_DEPTH_FACTOR = 1024  # 10-bit
+    result = img_array.copy()
 
-    # Radiance to Electrons
-    electrons = img_array * CONVERSION_FACTOR
+    # 1. הרעש הפיזיקלי המקורי
+    if APPLY_PHYSICAL_NOISE:
+        CONVERSION_FACTOR = 178.6304426659069
+        EXPOSURE_TIME_US = 205
+        DARK_CURRENT_RATE = 4.72 * 1e-6  # e-/sec
+        FULL_WELL_CAPACITY = 10600
+        BIT_DEPTH_FACTOR = 1024  # 10-bit
 
-    # Dark Current Noise (Gaussian)
-    dark_noise_mean = DARK_CURRENT_RATE * EXPOSURE_TIME_US
-    dn_noise = np.random.normal(loc=dark_noise_mean, scale=dark_noise_mean ** 0.5, size=electrons.shape)
-    electrons += dn_noise
+        electrons = result * CONVERSION_FACTOR
 
-    # Read Noise (Gaussian, mean=0)
-    read_noise = np.random.normal(loc=0.0, scale=5.29 ** 0.5, size=electrons.shape)
-    electrons += read_noise
+        dark_noise_mean = DARK_CURRENT_RATE * EXPOSURE_TIME_US
+        dn_noise = np.random.normal(loc=dark_noise_mean, scale=dark_noise_mean ** 0.5, size=electrons.shape)
+        electrons += dn_noise
 
-    # Clipping & Quantization
-    electrons = np.clip(electrons, a_min=0, a_max=FULL_WELL_CAPACITY)
-    dn = electrons * (BIT_DEPTH_FACTOR / FULL_WELL_CAPACITY)
-    electrons_quantized = np.round(dn) * (FULL_WELL_CAPACITY / BIT_DEPTH_FACTOR)
+        read_noise = np.random.normal(loc=0.0, scale=5.29 ** 0.5, size=electrons.shape)
+        electrons += read_noise
 
-    # Back to Radiance (as expected by model input)
-    radiance = electrons_quantized / CONVERSION_FACTOR
-    return radiance.astype(np.float32)
+        electrons = np.clip(electrons, a_min=0, a_max=FULL_WELL_CAPACITY)
+        dn = electrons * (BIT_DEPTH_FACTOR / FULL_WELL_CAPACITY)
+        electrons_quantized = np.round(dn) * (FULL_WELL_CAPACITY / BIT_DEPTH_FACTOR)
+
+        result = electrons_quantized / CONVERSION_FACTOR
+
+    # 2. תוספת של X אחוז מערך הפיקסל רק למצלמה הספציפית
+    if APPLY_PERCENTAGE_NOISE and camera_idx == TARGET_CAMERA_INDEX:
+        # תוספת קבועה של X אחוז:
+        result = result + (result * PERCENTAGE_NOISE_X)
+
+    return result.astype(np.float32)
 
 print("[INFO] Starting evaluation...")
 
@@ -349,17 +356,19 @@ for i in tqdm(range(len(eval_ds)), desc="Evaluating"):
     # 1. Get item from Test Dataset
     input_seq, gt_vel_seq, mask_seq = eval_ds[i]
 
+    # ---------------------------
     # --- NEW: Noise Support ---
-    if ADD_SENSOR_NOISE:
+    if APPLY_PHYSICAL_NOISE or APPLY_PERCENTAGE_NOISE:
         # Clone and move to CPU/Numpy to apply sensor effects
         input_np = input_seq.clone().cpu().numpy()  # Shape: (T, C, H, W)
         T, C, H, W = input_np.shape
         for t in range(T):
             for c in range(C):
-                input_np[t, c] = apply_sensor_noise(input_np[t, c])
+                # נעביר גם את אינדקס המצלמה (c) לפונקציה
+                input_np[t, c] = apply_sensor_noise(input_np[t, c], camera_idx=c)
         # Convert back to tensor
         input_seq = torch.from_numpy(input_np)
-    # ---------------------------
+    # ---------
 
     x_input = input_seq.unsqueeze(0).to(DEVICE)
     all_preds = []

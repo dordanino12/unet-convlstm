@@ -13,8 +13,8 @@ from tqdm import tqdm
 # ---------------------------------------------------------
 
 root_images = "/wdata_visl/danino/dataset_rendered_data_spp8192_g85/render_images/"
-root_maps = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_vel_maps_slice_1500m_nadir/"
-output_path = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1500m.npz"
+root_maps = "/wdata_visl/danino/dataset_128x128x200_overlap_64_stride_7x7_split_vel_maps_slice_1300m_nadir/"
+output_path = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1300m.npz"
 
 SEQ_LEN = 12  # Time 0 to 220 (12 frames)
 NUM_SAMPLES = 49  # Samples 000 to 048 (7x7 spatial grid)

@@ -724,6 +724,14 @@ def sample_scatter_points(gt_vals, pred_vals, label_suffix):
     
     return x_scatter, y_scatter, scatter_min, scatter_max, scatter_range_padded
 
+
+import copy
+cmap_jet_masked = copy.copy(plt.get_cmap('jet'))
+cmap_jet_masked.set_bad(color='black')
+
+cmap_rdbu_masked = copy.copy(plt.get_cmap('RdBu_r'))
+cmap_rdbu_masked.set_bad(color='black')
+
 # --- Create video with matplotlib 2x3 grid ---
 fps = 2  # Define frames per second for video
 video_writer = None
@@ -853,14 +861,14 @@ for t in range(sequence.shape[0]):
 
         # Prediction (velocity)
         save_section_pdf(pred_disp, "Predicted Top Velocity [m/s]", os.path.join(frame_dir, "pred.pdf"),
-                         cmap='jet', add_colorbar=True,
+                         cmap=cmap_jet_masked, add_colorbar=True,
                          m_per_pixel=m_per_pixel, extent_m=extent_m, vmin=vmin_pred, vmax=vmax_pred,
                          tick_step=1.0)
 
         # GT and Difference (if available)
         if gt_img is not None:
             save_section_pdf(gt_disp, "Ground Truth Top Velocity [m/s]", os.path.join(frame_dir, "gt.pdf"),
-                             cmap='jet', add_colorbar=True,
+                             cmap=cmap_jet_masked, add_colorbar=False,
                              m_per_pixel=m_per_pixel, extent_m=extent_m, vmin=vmin_pred, vmax=vmax_pred,
                              tick_step=1.0)
 

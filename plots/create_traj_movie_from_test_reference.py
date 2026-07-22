@@ -31,7 +31,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Sequence index used across all datasets
-SEQUENCE_IDX = 1000
+SEQUENCE_IDX = 250
 
 # Colorbar
 FOCUS_THRESH = 3  # SymLogNorm linear threshold (matching test_multi_height_models.py)
@@ -47,16 +47,16 @@ OUTPUT_VIDEO = os.path.join(parent_dir, "plots", "traj_dashboard_movie.mp4")
 
 MODELS_CFG = {
     "500m": {
-        "npz": os.path.join(parent_dir, "data", "dataset_trajectory_sequences_samples_W_500m_w.npz"),
-        "ckpt": os.path.join(parent_dir, "models", "mit_b1_500m_slice_mask_no_gtenv_mix_loss_best_bin_loss.pt"),
+        "npz": os.path.join(parent_dir, "data", "wacv_data/500m_kfold_w_sensor_noise_both/test_w.npz"),
+        "ckpt": os.path.join(parent_dir, "models", "wacv/500m/mit_b1_500m_fold_01_val_r0-1_c0-2_best_bin_loss.pt"),
     },
     "1000m": {
-        "npz": os.path.join(parent_dir, "data", "dataset_trajectory_sequences_samples_W_1000m_w.npz"),
-        "ckpt": os.path.join(parent_dir, "models", "mit_b1_1000m_slice_mask_no_gtenv_mix_loss_best_bin_loss.pt"),
+        "npz": os.path.join(parent_dir, "data", "wacv_data/1000m_kfold_w_sensor_noise_both/test_w.npz"),
+        "ckpt": os.path.join(parent_dir, "models", "wacv/1000m/mit_b1_1000m_fold_01_val_r0-1_c0-2_best_bin_loss.pt"),
     },
     "1500m": {
-        "npz": os.path.join(parent_dir, "data", "dataset_trajectory_sequences_samples_W_1500m_w.npz"),
-        "ckpt": os.path.join(parent_dir, "models", "mit_b1_1500m_slice_mask_no_gtenv_mix_loss_best_bin_loss.pt"),
+        "npz": os.path.join(parent_dir, "data", "wacv_data/1500m_kfold_w_sensor_noise_both/test_w.npz"),
+        "ckpt": os.path.join(parent_dir, "models", "wacv/1500m/mit_b1_1500m_fold_01_val_r0-1_c0-2_best_bin_loss.pt"),
     },
 }
 
@@ -132,11 +132,11 @@ def add_title_frames(video_writer, frame_size, fps, seconds):
         ax.axis('off')
         
         # Title line 1
-        ax.text(0.5, 0.58, "Inferred Spaceborne Sensing of Vertical Air Flow",
+        ax.text(0.5, 0.58, "Inferring Vertical Air Flow by Spaceborne Imaging",
                 ha='center', va='center', fontsize=28, fontweight='bold', color='#1e1e1e')
         
         # Title line 2
-        ax.text(0.5, 0.38, "Paper ID #10787",
+        ax.text(0.5, 0.38, "Paper ID #54",
                 ha='center', va='center', fontsize=23, fontweight='bold', color='#5a5a5a')
         
         fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
