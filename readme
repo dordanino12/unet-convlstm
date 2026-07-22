@@ -1,6 +1,9 @@
 new server : 132.28.58.142
 
-nohup python -u my_script.py > output_train.log 2>&1 &
+nohup python -u preprocessing/build_sequnces_fix_data_leak.py > buildsep1300m.log 2>&1 &
+
+nohup /home/danino/PycharmProjects/pythonProject/venv/bin/python -u main.py --kfold-dir data/wacv_data/1100m_kfold_w_sensor_noise_both > output_train_1100m.log 2>&1 &
+        if loss_mode == 'exponent':
 
 (The -u flag forces unbuffered output so logs appear immediately)
 
@@ -11,9 +14,11 @@ Then run : kill "pid number"
 setsid pycharm >/dev/null 2>&1 &
 source /home/danino/PycharmProjects/pythonProject/venv/bin/activate
 
-CUDA_LAUNCH_BLOCKING=1 nohup python -u main.py > train_nolstm.log 2>&1 &
+CUDA_LAUNCH_BLOCKING=1 nohup python -u main.py > buildseq700.log 2>&1 &
 
  i=0; for d in $(ls -1 | sort); do mv "$d" "$(printf "%010d" $i)"; ((i+=1)); done
 
 to copy data to the server :
 rsync -avP --partial --append-verify --chown=:cycle1_iit_schechner_prj /home/danino/PycharmProjects/pythonProject/data/3d_688to702_test_uvw.npz dor.danino@slurm-login.iucc.ac.il:/shared/cycle1_iit_schechner_prj/data_to_train/
+
+rsync -avz --progress dor.danino@132.68.58.102:~/unet-convlstm/dataset_128x128x200_overlap_64_stride_7x7_split_vel_maps_slice_900m_nadir /wdata_visl/danino/
