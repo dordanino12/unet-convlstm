@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm  # Progress bar
 import matplotlib as mpl
 from PIL import Image
+import torch.nn.functional as F
 
 # Global font settings MUST be set FIRST before creating any figures
 mpl.rcParams.update({
@@ -39,7 +40,7 @@ from resnet18 import PretrainedTemporalUNet, PretrainedTemporalUNetMitB1, Pretra
 # Configuration
 # -----------------------------
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-USE_MASK = False  # Set to True if the dataset provides a mask channel
+USE_MASK = "slice_mask"  # Set to True False or "slice_mask"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_GT_ENVELOPE_INPUT = False  # Set True when model expects GT envelope channel
 BACKBONE = "mit_b1"  # "resnet18", "mit_b1", "mit_b2", or "mit_b3"
@@ -49,11 +50,11 @@ USE_ONE_SATELLITE = False
 
 
 # Paths
-NPZ_TRAIN_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/500m_kfold_w_sensor_noise_both/fold_01_val_r0-1_c0-2/train_w.npz"
-NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/500m_kfold_w_sensor_noise_both/test_w.npz"
+NPZ_TRAIN_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1000m_kfold_w_sensor_noise_both/fold_01_val_r0-1_c0-2/train_w.npz"
+NPZ_TEST_PATH = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1000m_kfold_w_sensor_noise_both/test_w.npz"
 CHECKPOINT_PATH = "/models/wacv/1000m/mit_b1_1000m_fold_02_val_r0-1_c4-6_best_bin_loss.pt"
-KFOLD_MODELS_DIR = "/home/danino/PycharmProjects/pythonProject/models/wacv/500m/"
-KFOLD_DATA_DIR = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/500m_kfold_w_sensor_noise_both/"
+KFOLD_MODELS_DIR = "/home/danino/PycharmProjects/pythonProject/models/wacv/1000m/"
+KFOLD_DATA_DIR = "/home/danino/PycharmProjects/pythonProject/data/wacv_data/1000m_kfold_w_sensor_noise_both/"
 #KFOLD_MODELS_DIR = None  # Set to None to disable k-fold ensemble mode
 #KFOLD_DATA_DIR = None  # Set to None to disable k-fold ensemble mode
 save_path = "/home/danino/PycharmProjects/pythonProject/plots/evaluation_comprehensive.pdf"
@@ -61,10 +62,10 @@ output_dir = "/home/danino/PycharmProjects/pythonProject/plots/"
 # Option to disable ConvLSTM temporal processing entirely
 USE_CONV_LSTM = True  # Set to True if the model uses ConvLSTM layers and you want to enable them during evaluation
 APPLY_PHYSICAL_NOISE = False     # (Dark current, Read noise)
-APPLY_PERCENTAGE_NOISE = True    # 
+APPLY_PERCENTAGE_NOISE = True    #
 PERCENTAGE_NOISE_X = 0.03        # 
 TARGET_CAMERA_INDEX = 1
-TEXT_FOR_SCATER = "z = 500m"
+TEXT_FOR_SCATER = "z = 1000m"
 
 # Plotting Configuration
 # --- UPDATED CONFIG FOR BALANCED SAMPLING ---
@@ -395,16 +396,50 @@ for i in tqdm(range(len(eval_ds)), desc="Evaluating"):
     pred_vel_denorm = final_pred_vel_denorm
 
     # --- Masking Logic ---
-    if USE_MASK:
+    valid_pixels = None
+
+    if USE_MASK == "slice_mask":
+        # Extract the 5th time step while keeping the time dimension as a batch
+        # dimension (size 1) for max_pool2d.
+        # mask_seq shape goes from [T, C, H, W] -> [1, C, H, W]
+        # or from [T, H, W] -> [1, H, W]
+        mask_slice_5 = mask_seq[5:6]
+
+        EXPAND_KERNEL = 5
+        padding = EXPAND_KERNEL // 2
+
+        expanded_mask_slice = F.max_pool2d(
+            mask_slice_5,
+            kernel_size=EXPAND_KERNEL,
+            stride=1,
+            padding=padding
+        )
+
+        # Broadcast the expanded mask across the full time sequence
+        T = mask_seq.shape[0]
+        expanded_mask_seq = expanded_mask_slice.expand(T, -1, -1, -1)
+
+        mask_np = expanded_mask_seq.cpu().numpy()
+        valid_pixels = (mask_np > 0.1)
+
+    elif USE_MASK:
         mask_np = mask_seq.cpu().numpy()
+        valid_pixels = (mask_np > 0.1)
+
+    # --- Apply Mask or Fallback ---
+    if valid_pixels is not None:
         gt_np = gt_vel_denorm.cpu().numpy()
 
-        valid_pixels = (mask_np > 0.1)
+        # Ensure pred_vel_denorm is converted properly to numpy
+        if torch.is_tensor(pred_vel_denorm):
+            pred_np = pred_vel_denorm.cpu().numpy()
+        else:
+            pred_np = pred_vel_denorm
 
         if np.any(valid_pixels):
             # Extract valid values
             seq_gt_vals = gt_np[valid_pixels]
-            seq_pred_vals = pred_vel_denorm[valid_pixels]
+            seq_pred_vals = pred_np[valid_pixels]
 
             # Extract time indices
             t_idx = np.nonzero(valid_pixels)[0]
@@ -413,18 +448,26 @@ for i in tqdm(range(len(eval_ds)), desc="Evaluating"):
             scatter_gt_list.append(seq_gt_vals)
             scatter_pred_list.append(seq_pred_vals)
             scatter_time_list.append(seq_time_vals)
+
     else:
         # No mask logic
-        seq_gt_vals = gt_vel_denorm.cpu().numpy().flatten()
-        seq_pred_vals = pred_vel_denorm.flatten()
+        gt_np = gt_vel_denorm.cpu().numpy()
+        seq_gt_vals = gt_np.flatten()
+
+        if torch.is_tensor(pred_vel_denorm):
+            seq_pred_vals = pred_vel_denorm.cpu().numpy().flatten()
+        else:
+            seq_pred_vals = pred_vel_denorm.flatten()
+
         # Handle both 3D (T, H, W) and 4D (T, C, H, W) shapes
-        gt_shape = gt_vel_denorm.shape
+        gt_shape = gt_np.shape
         if len(gt_shape) == 4:
             T, C, H, W = gt_shape
             pixels_per_frame = C * H * W
         else:
             T, H, W = gt_shape
             pixels_per_frame = H * W
+
         seq_time_vals = np.repeat(np.arange(T), pixels_per_frame)
 
         scatter_gt_list.append(seq_gt_vals)
